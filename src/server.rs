@@ -1,3 +1,4 @@
+mod board_http;
 use crate::{Wire, now, security, store::Store};
 use anyhow::Result;
 use axum::{
@@ -58,6 +59,7 @@ struct Peer {
     sender: mpsc::Sender<Wire>,
     stop: watch::Sender<bool>,
     version: Option<String>,
+    capabilities: Vec<String>,
 }
 struct Pending {
     worker: String,
@@ -77,6 +79,8 @@ pub struct App {
     attempts: Mutex<VecDeque<Instant>>,
     login_lock: tokio::sync::Semaphore,
     deployment: Option<crate::webhook::Deployment>,
+    agent_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    board_wake: tokio::sync::Notify,
 }
 
 impl App {
@@ -113,6 +117,8 @@ impl App {
             attempts: Mutex::new(VecDeque::new()),
             login_lock: tokio::sync::Semaphore::new(2),
             deployment,
+            agent_locks: Mutex::new(HashMap::new()),
+            board_wake: tokio::sync::Notify::new(),
         }))
     }
     fn valid_session(&self, session: &Session) -> bool {
@@ -185,7 +191,9 @@ fn cookie(headers: &HeaderMap) -> Option<&str> {
 }
 
 pub fn router(app: Arc<App>) -> Router {
+    board_http::start(&app);
     Router::new()
+        .merge(board_http::routes())
         .route(
             "/healthz",
             get(|| async { Json(json!({"version":env!("CARGO_PKG_VERSION")})) }),
@@ -457,6 +465,60 @@ async fn rpc(
     if body.method.len() > 100 {
         return Err(rejected(StatusCode::BAD_REQUEST, "Invalid method"));
     }
+    let mut guard = None;
+    if body.method == "thread/resume"
+        && [
+            "developerInstructions",
+            "model",
+            "approvalPolicy",
+            "sandbox",
+            "config",
+        ]
+        .iter()
+        .any(|k| body.params.get(k).is_some())
+        && let Some(mut a) = app.store.board_agents()?.into_iter().find(|a| {
+            a.worker == worker && body.params["threadId"].as_str() == Some(a.thread.as_str())
+        })
+    {
+        let gate = app
+            .agent_locks
+            .lock()
+            .unwrap()
+            .entry(a.id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        guard = Some(gate.lock_owned().await);
+        a = app.store.board_agent(&a.id)?;
+        if let Some(persona) = body.params["developerInstructions"].as_str() {
+            a.persona = persona.to_owned();
+            app.store
+                .board_edit_agent(&a.id, &a.name, &a.persona, a.paused)?;
+        }
+        for key in ["model", "approvalPolicy", "sandbox", "config"] {
+            if let Some(v) = body.params.get(key) {
+                a.settings[key] = v.clone();
+            }
+        }
+        app.store.board_agent_settings(&a.id, &a.settings)?;
+        worker_call(
+            app.clone(),
+            worker.clone(),
+            "manager/agent/configure".into(),
+            json!({"id":a.id,"persona":a.persona,"settings":a.settings,"paused":a.paused}),
+        )
+        .await?;
+        app.emit(json!({"type":"board_changed"}));
+    }
+    let result = worker_call(app, worker, body.method, body.params).await?;
+    drop(guard);
+    Ok(Json(result))
+}
+async fn worker_call(
+    app: Arc<App>,
+    worker: String,
+    method: String,
+    params: Value,
+) -> ApiResult<Value> {
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
     {
@@ -483,8 +545,8 @@ async fn rpc(
             .sender
             .try_send(Wire::Request {
                 id: id.clone(),
-                method: body.method,
-                params: body.params,
+                method,
+                params,
             })
             .is_err()
         {
@@ -516,7 +578,7 @@ async fn rpc(
             if let Some(error) = error {
                 Err(ApiError(StatusCode::BAD_REQUEST, error))
             } else {
-                Ok(Json(result.unwrap_or(Value::Null)))
+                Ok(result.unwrap_or(Value::Null))
             }
         }
         _ => Err(rejected(StatusCode::BAD_GATEWAY, "Invalid worker response")),
@@ -606,6 +668,7 @@ async fn worker_socket(app: Arc<App>, id: String, socket: WebSocket) {
                 sender: tx,
                 stop,
                 version: None,
+                capabilities: Vec::new(),
             },
         ) {
             let _ = old.stop.send(true);
@@ -633,6 +696,9 @@ async fn worker_socket(app: Arc<App>, id: String, socket: WebSocket) {
                                 }
                                 Wire::Event {message}=>{
                                     if message["method"]=="manager/connected" {
+                                        if let Some(peer)=app.peers.lock().unwrap().get_mut(&id) && peer.generation==generation {
+                                            peer.capabilities=message["params"]["capabilities"].as_array().map(|a|a.iter().filter_map(Value::as_str).take(32).map(str::to_owned).collect()).unwrap_or_default();
+                                        }
                                         let version=message["params"]["workerVersion"].as_str().filter(|v|!v.is_empty() && v.len()<=128 && v.bytes().all(|c|c.is_ascii_alphanumeric() || b".+-_".contains(&c)));
                                         if let Some(version)=version {
                                             let mut peers=app.peers.lock().unwrap();

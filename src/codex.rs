@@ -13,10 +13,16 @@ use tokio::{
 };
 
 type Reply = std::result::Result<Value, String>;
+struct PendingCall {
+    sender: oneshot::Sender<Reply>,
+    method: String,
+    thread: Option<String>,
+}
 pub struct Codex {
     pub catalog: crate::catalog::Catalog,
+    pub agents: crate::agent_runtime::AgentRuntime,
     writer: mpsc::Sender<Value>,
-    pending: Mutex<HashMap<String, oneshot::Sender<Reply>>>,
+    pending: Mutex<HashMap<String, PendingCall>>,
     requests: Mutex<HashMap<String, Value>>,
     active: Mutex<HashMap<String, String>>,
     pub events: broadcast::Sender<Value>,
@@ -32,6 +38,7 @@ impl Codex {
         binary: &str,
         catalog_path: Option<std::path::PathBuf>,
     ) -> Result<Arc<Self>> {
+        let agents = crate::agent_runtime::AgentRuntime::open(catalog_path.as_deref())?;
         let catalog = crate::catalog::Catalog::open(catalog_path)?;
         let mut child = Command::new(binary)
             .args(["app-server", "--listen", "stdio://"])
@@ -49,6 +56,7 @@ impl Codex {
         let (tx, mut rx) = mpsc::channel::<Value>(128);
         let codex = Arc::new(Self {
             catalog,
+            agents,
             writer: tx,
             pending: Mutex::new(HashMap::new()),
             requests: Mutex::new(HashMap::new()),
@@ -87,7 +95,9 @@ impl Codex {
                 .alive
                 .store(false, std::sync::atomic::Ordering::Release);
             for (_, tx) in state.pending.lock().unwrap().drain() {
-                let _ = tx.send(Err("Codex process exited; restart the worker".into()));
+                let _ = tx
+                    .sender
+                    .send(Err("Codex process exited; restart the worker".into()));
             }
             state.requests.lock().unwrap().clear();
             state.active.lock().unwrap().clear();
@@ -110,7 +120,14 @@ impl Codex {
                 } else {
                     Ok(message.get("result").cloned().unwrap_or(Value::Null))
                 };
-                let _ = tx.send(reply);
+                if tx.method == "turn/start"
+                    && let Some(thread) = tx.thread
+                    && let Ok(value) = &reply
+                    && let Some(turn) = value["turn"]["id"].as_str()
+                {
+                    self.active.lock().unwrap().insert(thread, turn.to_owned());
+                }
+                let _ = tx.sender.send(reply);
             }
             return;
         }
@@ -133,6 +150,7 @@ impl Codex {
                 if let (Some(thread), Some(turn)) =
                     (params["threadId"].as_str(), params["turn"]["id"].as_str())
                 {
+                    self.agents.started(thread);
                     self.active
                         .lock()
                         .unwrap()
@@ -141,11 +159,25 @@ impl Codex {
             }
             "turn/completed" => {
                 if let Some(thread) = params["threadId"].as_str() {
-                    self.active.lock().unwrap().remove(thread);
-                    self.requests
-                        .lock()
-                        .unwrap()
-                        .retain(|_, v| v["params"]["threadId"].as_str() != Some(thread));
+                    let completed = params["turn"]["id"].as_str();
+                    let current = {
+                        let mut active = self.active.lock().unwrap();
+                        if completed.is_none()
+                            || active.get(thread).map(String::as_str) == completed
+                        {
+                            active.remove(thread);
+                            true
+                        } else {
+                            !active.contains_key(thread)
+                        }
+                    };
+                    if current {
+                        self.agents.completed(thread);
+                    }
+                    self.requests.lock().unwrap().retain(|_, v| {
+                        v["params"]["threadId"].as_str() != Some(thread)
+                            || (completed.is_some() && v["params"]["turnId"].as_str() != completed)
+                    });
                 }
             }
             "item/completed" => {
@@ -207,7 +239,14 @@ impl Codex {
         }
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id.clone(), tx);
+        self.pending.lock().unwrap().insert(
+            id.clone(),
+            PendingCall {
+                sender: tx,
+                method: method.to_owned(),
+                thread: params["threadId"].as_str().map(str::to_owned),
+            },
+        );
         let _guard = CallGuard {
             state: self.clone(),
             id: id.clone(),

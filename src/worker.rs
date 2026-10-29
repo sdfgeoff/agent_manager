@@ -174,6 +174,35 @@ async fn connection(credential: &Credential, codex: Arc<Codex>) -> Result<()> {
 }
 
 pub async fn dispatch(codex: Arc<Codex>, method: &str, params: Value) -> Result<Value> {
+    if method.starts_with("manager/agent/") {
+        return codex.agents.dispatch(&codex, method, params).await;
+    }
+    if method == "manager/instructions" {
+        let id = params["threadId"].as_str().context("Session id required")?;
+        let data = codex.call("thread/read", params.clone()).await?;
+        return Ok(
+            json!({"persona":crate::agent_runtime::session_instructions(&codex,id,&data["thread"])?}),
+        );
+    }
+    let thread = params["threadId"].as_str().unwrap_or("");
+    if codex.agents.bound(thread)
+        && matches!(
+            method,
+            "thread/resume" | "turn/start" | "turn/steer" | "thread/archive"
+        )
+    {
+        if method == "thread/archive" {
+            bail!("Registered agent sessions cannot be archived independently");
+        }
+        let _guard = codex.agents.thread_gate(thread).lock_owned().await;
+        codex.agents.prepare_manual(&codex, thread).await?;
+        let params = if method == "thread/resume" {
+            codex.agents.manual_resume(thread, params.clone())?
+        } else {
+            params
+        };
+        return codex.call(method, params).await;
+    }
     match method {
         "manager/list" => codex.list_sessions(params).await,
         "manager/status" => Ok(status(&codex)),
@@ -190,10 +219,11 @@ pub async fn dispatch(codex: Arc<Codex>, method: &str, params: Value) -> Result<
 }
 fn status(codex: &Codex) -> Value {
     let mut status = codex.status();
+    status["capabilities"] = json!(["board-agents"]);
     status["workerVersion"] = json!(env!("CARGO_PKG_VERSION"));
     status
 }
-fn absolute_path(params: &Value) -> Result<PathBuf> {
+pub(crate) fn absolute_path(params: &Value) -> Result<PathBuf> {
     let path = params["path"].as_str().unwrap_or("~");
     let home = std::env::var("HOME").context("HOME is not set")?;
     let path = if path == "~" {

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -9,6 +9,8 @@ use std::path::PathBuf;
     about = "Connect this machine to an Agent Manager server"
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Action>,
     #[arg(long)]
     host: Option<String>,
     /// Single-use enrollment key. Prefer AGENTMANAGER_KEY to avoid shell history.
@@ -21,10 +23,20 @@ struct Args {
     #[arg(long, default_value = "codex")]
     codex: String,
 }
+#[derive(Subcommand)]
+enum Action {
+    Mcp {
+        #[arg(long)]
+        credential_file: PathBuf,
+    },
+}
 #[tokio::main]
 async fn main() -> Result<()> {
-    agentmanager::tracing_init();
     let args = Args::parse();
+    if let Some(Action::Mcp { credential_file }) = &args.command {
+        return agentmanager::mcp::run(credential_file).await;
+    }
+    agentmanager::tracing_init();
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {

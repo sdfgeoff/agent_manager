@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::{path::Path, sync::Mutex};
 
-pub struct Store(Mutex<Connection>);
+pub struct Store(pub(crate) Mutex<Connection>, pub(crate) std::path::PathBuf);
 
 #[derive(Serialize)]
 pub struct WorkerRecord {
@@ -48,14 +48,29 @@ impl Store {
         tx.execute("INSERT INTO users (username,password_hash,version,created_at) SELECT 'admin',value,?1,?2 FROM settings WHERE key='password' ON CONFLICT(username) DO NOTHING",params![security::token(),now()])?;
         tx.execute("DELETE FROM settings WHERE key='password'", [])?;
         tx.commit()?;
-        Ok(Self(Mutex::new(db)))
+        crate::board::migrate(&db)?;
+        Ok(Self(Mutex::new(db), dir.to_path_buf()))
     }
     pub fn set_password(&self, hash: &str) -> Result<()> {
         self.set_user_password("admin", hash)
     }
     pub fn set_user_password(&self, username: &str, hash: &str) -> Result<()> {
         let username = security::username(username)?;
-        self.0.lock().unwrap().execute("INSERT INTO users VALUES (?1,?2,?3,?4) ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash,version=excluded.version",params![username,hash,security::token(),now()])?;
+        let mut db = self.0.lock().unwrap();
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM board_actors WHERE handle=?1 AND kind='agent')",
+            [&username],
+            |r| r.get::<_, bool>(0),
+        )? {
+            bail!("That username belongs to an agent; choose another username");
+        }
+        tx.execute("INSERT INTO users VALUES (?1,?2,?3,?4) ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash,version=excluded.version",params![username,hash,security::token(),now()])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO board_actors VALUES(?1,?2,?2,'human')",
+            params![format!("human:{username}"), username],
+        )?;
+        tx.commit()?;
         Ok(())
     }
     pub fn user(&self, username: &str) -> Result<Option<UserCredential>> {
@@ -182,10 +197,11 @@ impl Store {
         Ok(())
     }
     pub fn revoke(&self, id: &str) -> Result<()> {
-        self.0
-            .lock()
-            .unwrap()
-            .execute("DELETE FROM workers WHERE id=?1", [id])?;
+        let mut db = self.0.lock().unwrap();
+        let tx = db.transaction()?;
+        tx.execute("UPDATE board_agents SET paused=1,token_hash=?1||id,error='Worker registration was revoked' WHERE worker=?2",params![security::digest(&security::token()),id])?;
+        tx.execute("DELETE FROM workers WHERE id=?1", [id])?;
+        tx.commit()?;
         Ok(())
     }
     pub fn worker_exists(&self, id: &str) -> Result<bool> {

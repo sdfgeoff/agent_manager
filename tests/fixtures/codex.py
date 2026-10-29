@@ -35,6 +35,8 @@ def config(thread):
 
 for line in sys.stdin:
     message = json.loads(line)
+    with Path(sys.argv[0]).with_suffix('.calls.jsonl').open('a') as log:
+        log.write(json.dumps(message) + '\n')
     method = message.get('method')
     request_id = message.get('id')
     params = message.get('params', {})
@@ -60,6 +62,9 @@ for line in sys.stdin:
         save()
         result = config(thread)
     elif method == 'thread/resume':
+        if params['threadId'] not in threads:
+            send({'id': request_id, 'error': {'code': -32600, 'message': 'Session rollout is missing'}})
+            continue
         thread = threads[params['threadId']]
         if thread.get('locked'):
             send({'id': request_id, 'error': {'code': -32603, 'message': 'thread-store conflict: thread already has an active writer'}})
@@ -67,6 +72,23 @@ for line in sys.stdin:
         thread.update({k: v for k, v in params.items() if k not in ('threadId', 'excludeTurns')})
         save()
         result = config(thread)
+    elif method == 'thread/unsubscribe':
+        result = {'status': 'unsubscribed'}
+    elif method == 'thread/inject_items':
+        save()
+    elif method == 'turn/steer':
+        thread_id = params['threadId']
+        turns = threads[thread_id]['turns']
+        if not turns or turns[-1]['status'] != 'inProgress':
+            send({'id': request_id, 'error': {'code': -32600, 'message': 'No active turn'}})
+            continue
+        result = {'turnId': turns[-1]['id']}
+    elif method == 'turn/interrupt':
+        thread_id = params['threadId']
+        if threads[thread_id]['turns']:
+            threads[thread_id]['turns'][-1]['status'] = 'interrupted'
+            save()
+            event('turn/completed', {'threadId': thread_id, 'turn': {'id': params['turnId'], 'status': 'interrupted'}})
     elif method == 'thread/read':
         result = {'thread': metadata(threads[params['threadId']])}
     elif method == 'thread/name/set':

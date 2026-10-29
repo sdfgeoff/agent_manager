@@ -33,6 +33,16 @@ impl Catalog {
             {
                 metadata["name"] = previous["name"].clone();
             }
+            if let Some(instructions) = params
+                .get("developerInstructions")
+                .filter(|v| v.is_string())
+            {
+                metadata["developerInstructions"] = instructions.clone();
+            } else if let Some(previous) = threads.get(id)
+                && previous["developerInstructions"].is_string()
+            {
+                metadata["developerInstructions"] = previous["developerInstructions"].clone();
+            }
             threads.insert(id.into(), metadata);
         } else if let Some(id) = params["threadId"].as_str()
             && let Some(thread) = threads.get_mut(id)
@@ -61,6 +71,13 @@ impl Catalog {
             security::private_write(path, &serde_json::to_vec(&*threads)?)?;
         }
         Ok(())
+    }
+    pub fn instructions(&self, id: &str) -> Option<String> {
+        self.threads
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|t| t["developerInstructions"].as_str().map(str::to_owned))
     }
     pub fn page(&self, params: &Value) -> Value {
         let threads = self.threads.lock().unwrap();

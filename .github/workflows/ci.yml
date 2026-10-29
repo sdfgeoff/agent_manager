@@ -35,7 +35,7 @@ jobs:
           message="${message//$'\n'/'%0A'}"
           printf '::error title=Rust tests failed::%s\n' "$message"
           exit 1
-      - run: node --check web/app.js
+      - run: node --check web/app.js && node --check web/board.js
 
   release:
     needs: check

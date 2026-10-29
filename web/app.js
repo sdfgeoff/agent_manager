@@ -15,14 +15,14 @@ async function api(path, body, method) {
 }
 function rpc(method, params = {}, worker = state.worker) { if (!worker) return Promise.reject(new Error('Choose an online worker first.')); return api(`/api/workers/${encodeURIComponent(worker)}/rpc`, { method, params }); }
 function errorText(error) { const message = error.message || String(error); return message.includes('active writer') ? 'This conversation is open in another Codex process. You can read its history here; close the other client before sending a message or changing settings.' : message; }
-function safe(task) { return (...args) => Promise.resolve().then(() => task(...args)).catch(e => notice(errorText(e))); }
+function safe(task) { return (...args) => { if (args[0] instanceof Event && args[0].type === 'submit') args[0].preventDefault(); return Promise.resolve().then(() => task(...args)).catch(e => notice(errorText(e))); }; }
 function rememberSettings(id, result) {
   const previous = settings.get(id) || {}; const thread = result.thread || {};
   const config = { ...previous, model: result.model || thread.model || previous.model || '', effort: result.reasoningEffort || thread.reasoningEffort || previous.effort || '', approvalPolicy: result.approvalPolicy || previous.approvalPolicy || 'on-request', sandbox: result.sandbox ? result.sandbox.type === 'dangerFullAccess' ? 'danger-full-access' : result.sandbox.type === 'readOnly' ? 'read-only' : 'workspace-write' : previous.sandbox || 'workspace-write' };
   settings.set(id, config); return config;
 }
 function showLogin() {
-  state.events?.close(); state.events = null; state.epoch++; state.worker = null; state.thread = null;
+  window.Board?.reset(); state.events?.close(); state.events = null; state.epoch++; state.worker = null; state.thread = null;
   state.items.clear(); state.requests = []; state.active = {}; settings.clear(); drafts.clear();
   $('messages').replaceChildren(); $('requests').replaceChildren(); $('prompt').value = ''; $('app').hidden = true; $('login-view').hidden = false;
   document.querySelectorAll('dialog[open]').forEach(d => d.close());
@@ -100,7 +100,7 @@ async function loadStatus() {
 async function openThread(thread) {
   saveDraft(); $('prompt').value = drafts.get(`${state.worker}/${thread.id}`) || '';
   const epoch = ++state.epoch; const worker = state.worker; state.thread = thread; state.items.clear(); state.syncing = true; state.buffered = [];
-  $('messages').replaceChildren(); $('welcome').hidden = true; $('conversation').hidden = false; $('composer').hidden = false; $('configure').disabled = false;
+  $('register-session').hidden = false; $('messages').replaceChildren(); $('welcome').hidden = true; $('conversation').hidden = false; $('composer').hidden = false; $('configure').disabled = false;
   $('session-title').textContent = thread.name || thread.preview || 'Untitled session'; $('session-path').textContent = thread.cwd || ''; $('sidebar').classList.remove('open'); renderThreads(); notice('');
   try {
     const result = await rpc('thread/read', { threadId: thread.id }, worker);
@@ -152,6 +152,7 @@ function connectEvents() {
   events.onmessage = event => {
     try {
       const data = JSON.parse(event.data);
+      if (data.type === 'board_changed') window.Board?.changed();
       if (data.type === 'workers_changed') safe(async () => { await loadWorkers(); if (online()) { await loadThreads(); await loadStatus(); if (state.thread) await openThread(state.thread); } })();
       if (data.type === 'resync') safe(async () => { if (state.thread) await openThread(state.thread); await loadStatus(); })();
       if (data.type === 'codex' && data.worker === state.worker) {
@@ -230,7 +231,7 @@ $('composer').onsubmit = safe(async event => {
     if (state.thread?.id === threadId && $('prompt').value.trim() === text) $('prompt').value = ''; await loadStatus(); scrollEnd(true);
   } finally { state.sessionBusy = false; updateControls(); }
 });
-$('prompt').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !matchMedia('(pointer: coarse)').matches) { event.preventDefault(); $('composer').requestSubmit(); } };
+$('prompt').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !matchMedia('(pointer: coarse)').matches) { event.preventDefault(); if (!$('send').disabled) $('composer').requestSubmit($('send')); } };
 $('stop').onclick = safe(async () => { const threadId = state.thread.id; await rpc('turn/interrupt', { threadId, turnId: state.active[threadId] }); });
 async function newSession() {
   if (!online()) return; state.edit = false; $('dialog-title').textContent = 'New session'; $('create').textContent = 'Create session ↗';
@@ -242,7 +243,7 @@ $('configure').onclick = safe(async () => {
   const resumed = await rpc('thread/resume', { threadId: id, excludeTurns: true });
   if (epoch !== state.epoch) return;
   state.edit = true; const config = rememberSettings(id, resumed);
-  $('dialog-title').textContent = 'Session settings'; $('create').textContent = 'Save settings'; $('new-name').value = state.thread.name || ''; $('new-path').value = state.thread.cwd || ''; $('new-path').disabled = true; $('browse').disabled = true; $('new-model').value = config.model || ''; $('new-effort').value = config.effort || ''; $('new-approval').value = config.approvalPolicy || 'on-request'; $('new-sandbox').value = config.sandbox || 'workspace-write'; $('new-instructions').value = ''; $('new-instructions').disabled = true; $('session-error').textContent = ''; $('session-dialog').showModal();
+  $('dialog-title').textContent = 'Session settings'; $('create').textContent = 'Save settings'; $('new-name').value = state.thread.name || ''; $('new-path').value = state.thread.cwd || ''; $('new-path').disabled = true; $('browse').disabled = true; $('new-model').value = config.model || ''; $('new-effort').value = config.effort || ''; $('new-approval').value = config.approvalPolicy || 'on-request'; $('new-sandbox').value = config.sandbox || 'workspace-write'; const instructions = await rpc('manager/instructions', { threadId: id }).catch(e => { if (e.message.includes('Unsupported method')) return null; throw e; }); if (epoch !== state.epoch) return; $('new-instructions').value = instructions?.persona || ''; $('new-instructions').disabled = !instructions; $('new-instructions').placeholder = instructions ? 'Optional instructions for this session' : 'Upgrade the worker to edit custom instructions'; $('session-error').textContent = ''; $('session-dialog').showModal();
 });
 $('session-form').onsubmit = async event => {
   event.preventDefault(); const button = $('create'); button.disabled = true; $('session-error').textContent = '';
@@ -253,7 +254,7 @@ $('session-form').onsubmit = async event => {
     let thread;
     if (state.edit) {
       if (state.active[state.thread.id]) throw new Error('Stop or wait for the current task before changing session settings.');
-      const result = await rpc('thread/resume', { ...params, threadId: state.thread.id, excludeTurns: true }, worker); thread = result.thread;
+      const result = await rpc('thread/resume', { ...params, ...(!$('new-instructions').disabled ? { developerInstructions: $('new-instructions').value } : {}), threadId: state.thread.id, excludeTurns: true }, worker); thread = result.thread;
     } else {
       const folder = await rpc('fs/list', { path: $('new-path').value.trim() }, worker);
       const instructions = $('new-instructions').value.trim();
