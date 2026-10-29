@@ -22,11 +22,11 @@ function showLogin() {
   document.querySelectorAll('dialog[open]').forEach(d => d.close());
 }
 async function start() {
-  await api('/api/me'); $('login-view').hidden = true; $('app').hidden = false; await loadWorkers(); connectEvents();
+  const user = await api('/api/me'); $('logout').title = `Sign out ${user.username}`; $('login-view').hidden = true; $('app').hidden = false; await loadWorkers(); connectEvents();
 }
 $('login-form').onsubmit = async event => {
   event.preventDefault(); const button = event.submitter; button.disabled = true; $('login-error').textContent = '';
-  try { await api('/api/login', { password: $('password').value }); $('password').value = ''; await start(); } catch (e) { $('login-error').textContent = e.message; } finally { button.disabled = false; }
+  try { await api('/api/login', { username: $('username').value.trim(), password: $('password').value }); $('password').value = ''; await start(); } catch (e) { $('login-error').textContent = e.message; } finally { button.disabled = false; }
 };
 $('logout').onclick = safe(async () => { await api('/api/logout', {}); showLogin(); });
 async function loadWorkers() {
@@ -60,7 +60,7 @@ async function loadThreads(more = false) {
   const worker = state.worker;
   const data = await rpc('manager/list', { limit: 50, ...(more && state.cursor ? { cursor: state.cursor } : {}) }, worker);
   if (worker !== state.worker) return;
-  state.threads = more ? [...state.threads, ...data.data] : data.data; state.cursor = data.nextCursor; $('more-sessions').hidden = !state.cursor; renderThreads();
+  state.threads = [...new Map((more ? [...state.threads, ...data.data] : data.data).map(thread => [thread.id, thread])).values()].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)); state.cursor = data.nextCursor; $('more-sessions').hidden = !state.cursor; renderThreads();
 }
 function renderThreads() {
   const container = $('sessions'); container.replaceChildren();
@@ -152,7 +152,7 @@ function handleCodex(message) {
   const method = message.method; const p = message.params || {};
   if (message.id !== undefined || method === 'manager/requestsChanged' || method === 'turn/completed' || method === 'item/completed') safe(loadStatus)();
   if (method === 'manager/codexExited') notice('Codex exited. Restart the worker to resume saved sessions.');
-  if (['thread/started', 'thread/name/updated', 'thread/archived', 'thread/unarchived'].includes(method)) safe(() => loadThreads())();
+  if (['manager/sessionsChanged', 'thread/started', 'thread/name/updated', 'thread/archived', 'thread/unarchived'].includes(method)) safe(() => loadThreads())();
   if (method === 'manager/resync' || method === 'manager/connected') safe(async () => { await loadStatus(); if (state.thread) await openThread(state.thread); })();
   if (method === 'turn/started') { state.active[p.threadId] = p.turn.id; updateControls(); renderThreads(); }
   if (method === 'turn/completed') { delete state.active[p.threadId]; updateControls(); safe(() => loadThreads())(); if (p.turn?.error) notice(p.turn.error.message || JSON.stringify(p.turn.error)); }

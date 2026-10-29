@@ -3,7 +3,11 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(about = "Connect this machine to an Agent Manager server")]
+#[command(
+    name = "worker",
+    version,
+    about = "Connect this machine to an Agent Manager server"
+)]
 struct Args {
     #[arg(long)]
     host: Option<String>,

@@ -3,7 +3,12 @@ pub mod codex;
 pub mod security;
 pub mod server;
 pub mod store;
+pub mod updater;
+pub mod webhook;
 pub mod worker;
+
+#[cfg(test)]
+mod test_support;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

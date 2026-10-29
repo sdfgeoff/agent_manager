@@ -175,7 +175,7 @@ async fn connection(credential: &Credential, codex: Arc<Codex>) -> Result<()> {
 
 pub async fn dispatch(codex: Arc<Codex>, method: &str, params: Value) -> Result<Value> {
     match method {
-        "manager/list" => Ok(codex.catalog.page(&params)),
+        "manager/list" => codex.list_sessions(params).await,
         "manager/status" => Ok(codex.status()),
         "manager/respond" => codex.respond(params).await,
         "fs/list" => list_dir(params).await,

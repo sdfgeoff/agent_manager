@@ -46,7 +46,13 @@ for line in sys.stdin:
     elif method == 'model/list':
         result = {'data': [{'id': 'test-model', 'model': 'test-model', 'displayName': 'Test model'}]}
     elif method == 'thread/list':
-        result = {'data': [metadata(t) for t in threads.values()], 'nextCursor': None}
+        assert 'cwd' not in params, 'History must span all working folders'
+        stored = [metadata(t) for t in threads.values() if t.get('turns') and t.get('source', 'vscode') in params.get('sourceKinds', ['cli', 'vscode'])]
+        stored.sort(key=lambda t: t.get('updatedAt', 0), reverse=True)
+        offset = int(params.get('cursor', 'page:0').split(':')[1])
+        limit = params.get('limit', 50)
+        end = offset + limit
+        result = {'data': stored[offset:end], 'nextCursor': 'page:' + str(end) if end < len(stored) else None}
     elif method == 'thread/start':
         thread_id = 'thread-' + uuid.uuid4().hex[:8]
         thread = {**params, 'id': thread_id, 'name': None, 'preview': '', 'turns': [], 'status': {'type': 'idle'}}
@@ -74,7 +80,7 @@ for line in sys.stdin:
         send({'id': request_id, 'result': {'turn': turn}})
         event('turn/started', {'threadId': thread_id, 'turn': {'id': 'turn-1'}})
         event('item/completed', {'threadId': thread_id, 'item': user})
-        send({'id': 100, 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread_id, 'turnId': 'turn-1', 'itemId': 'item-1', 'command': 'echo test', 'cwd': thread.get('cwd', '/tmp'), 'reason': 'Test approval'}})
+        send({'id': 100, 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread_id, 'turnId': 'turn-1', 'itemId': 'item-1', 'command': 'echo test', 'cwd': thread.get('cwd', '/projects/test'), 'reason': 'Test approval'}})
         continue
     elif method is None and request_id == 100:
         thread_id = approval_thread

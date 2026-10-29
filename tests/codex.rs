@@ -1,10 +1,72 @@
+#[path = "../src/test_support.rs"]
+mod test_support;
 use agentmanager::{codex::Codex, worker};
 use serde_json::json;
 use std::{os::unix::fs::PermissionsExt, time::Duration};
 
 #[tokio::test]
+async fn discovery_spans_cli_and_desktop_folders_and_keeps_empty_managed_sessions() {
+    let dir = test_support::tempdir();
+    let binary = dir.path().join("codex-test");
+    std::fs::write(&binary, include_str!("fixtures/codex.py")).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let saved = json!({"cli-old":{"id":"cli-old","name":"CLI project","source":"cli","cwd":"/projects/one","preview":"Earlier work","updatedAt":20,"turns":[{"id":"old-turn","items":[]}]},"desktop-old":{"id":"desktop-old","name":"Desktop project","source":"vscode","cwd":"/unrelated/project","preview":"Other work","updatedAt":10,"turns":[{"id":"desktop-turn","items":[]}]}});
+    std::fs::write(
+        binary.with_extension("state.json"),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+    let codex = Codex::spawn(binary.to_str().unwrap()).await.unwrap();
+    let empty = codex
+        .call("thread/start", json!({"cwd":dir.path()}))
+        .await
+        .unwrap();
+    let empty_id = empty["thread"]["id"].as_str().unwrap();
+    let first = worker::dispatch(
+        codex.clone(),
+        "manager/list",
+        json!({"limit":1,"cwd":"/projects/one"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        first["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"] == empty_id)
+    );
+    assert!(
+        first["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"] == "cli-old")
+    );
+    let second = worker::dispatch(
+        codex.clone(),
+        "manager/list",
+        json!({"limit":1,"cursor":first["nextCursor"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second["data"][0]["cwd"], "/unrelated/project");
+    assert!(second["nextCursor"].is_null());
+    assert_eq!(
+        codex
+            .call(
+                "thread/resume",
+                json!({"threadId":"desktop-old","excludeTurns":true})
+            )
+            .await
+            .unwrap()["thread"]["id"],
+        "desktop-old"
+    );
+}
+
+#[tokio::test]
 async fn approvals_survive_without_subscribers_and_can_only_be_answered_once() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_support::tempdir();
     let binary = dir.path().join("codex-test");
     std::fs::write(&binary, include_str!("fixtures/codex.py")).unwrap();
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -42,7 +104,7 @@ async fn approvals_survive_without_subscribers_and_can_only_be_answered_once() {
         worker::dispatch(
             codex.clone(),
             "command/exec",
-            json!({"command":"touch /tmp/should-not-run"})
+            json!({"command":"touch /not-executed"})
         )
         .await
         .is_err()
@@ -68,7 +130,7 @@ async fn installed_codex_handshake_and_models() {
 #[tokio::test]
 #[ignore = "requires installed Codex; exercises session lifecycle in a temporary Codex home, no inference"]
 async fn installed_codex_session_lifecycle() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_support::tempdir();
     let binary = dir.path().join("isolated-codex");
     std::fs::write(&binary,"#!/usr/bin/env python3\nimport os,sys\nos.environ['CODEX_HOME']=sys.argv[0]+'.home'\nos.makedirs(os.environ['CODEX_HOME'],exist_ok=True)\nos.execvp('codex',['codex',*sys.argv[1:]])\n").unwrap();
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -87,6 +149,17 @@ async fn installed_codex_session_lifecycle() {
         .await
         .unwrap();
     assert_eq!(resumed["thread"]["name"], "Lifecycle smoke test");
+    let list = codex
+        .list_sessions(json!({"cwd":"/some-other-folder"}))
+        .await
+        .unwrap();
+    assert!(
+        list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|thread| thread["id"] == id)
+    );
     let history = codex
         .call(
             "thread/turns/list",

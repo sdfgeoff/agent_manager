@@ -13,28 +13,96 @@ pub struct WorkerRecord {
     pub created_at: i64,
 }
 
+#[derive(Serialize)]
+pub struct UserRecord {
+    pub username: String,
+    pub created_at: i64,
+}
+pub struct UserCredential {
+    pub username: String,
+    pub password_hash: String,
+    pub version: String,
+}
+
 impl Store {
     pub fn open(dir: &Path) -> Result<Self> {
         security::private_dir(dir)?;
-        let db = Connection::open(dir.join("agentmanager.sqlite3"))?;
+        let mut db = Connection::open(dir.join("agentmanager.sqlite3"))?;
+        db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS enrollment (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY, name TEXT NOT NULL, credential_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);")?;
+            CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY, name TEXT NOT NULL, credential_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, version TEXT NOT NULL, created_at INTEGER NOT NULL);")?;
+        let tx = db.transaction()?;
+        tx.execute("INSERT INTO users (username,password_hash,version,created_at) SELECT 'admin',value,?1,?2 FROM settings WHERE key='password' ON CONFLICT(username) DO NOTHING",params![security::token(),now()])?;
+        tx.execute("DELETE FROM settings WHERE key='password'", [])?;
+        tx.commit()?;
         Ok(Self(Mutex::new(db)))
     }
-    pub fn password(&self) -> Result<Option<String>> {
+    pub fn set_password(&self, hash: &str) -> Result<()> {
+        self.set_user_password("admin", hash)
+    }
+    pub fn set_user_password(&self, username: &str, hash: &str) -> Result<()> {
+        let username = security::username(username)?;
+        self.0.lock().unwrap().execute("INSERT INTO users VALUES (?1,?2,?3,?4) ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash,version=excluded.version",params![username,hash,security::token(),now()])?;
+        Ok(())
+    }
+    pub fn user(&self, username: &str) -> Result<Option<UserCredential>> {
+        let username = security::username(username)?;
         Ok(self
             .0
             .lock()
             .unwrap()
-            .query_row("SELECT value FROM settings WHERE key='password'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT username,password_hash,version FROM users WHERE username=?1",
+                [username],
+                |r| {
+                    Ok(UserCredential {
+                        username: r.get(0)?,
+                        password_hash: r.get(1)?,
+                        version: r.get(2)?,
+                    })
+                },
+            )
             .optional()?)
     }
-    pub fn set_password(&self, hash: &str) -> Result<()> {
-        self.0.lock().unwrap().execute("INSERT INTO settings VALUES ('password',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [hash])?;
+    pub fn user_version(&self, username: &str) -> Result<Option<String>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT version FROM users WHERE username=?1",
+                [username],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+    pub fn users(&self) -> Result<Vec<UserRecord>> {
+        let db = self.0.lock().unwrap();
+        let mut stmt = db.prepare("SELECT username,created_at FROM users ORDER BY username")?;
+        Ok(stmt
+            .query_map([], |r| {
+                Ok(UserRecord {
+                    username: r.get(0)?,
+                    created_at: r.get(1)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?)
+    }
+    pub fn remove_user(&self, username: &str) -> Result<()> {
+        let username = security::username(username)?;
+        let mut db = self.0.lock().unwrap();
+        let tx = db.transaction()?;
+        let count: i64 = tx.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
+        if count <= 1 {
+            bail!("Cannot remove the last account");
+        }
+        if tx.execute("DELETE FROM users WHERE username=?1", [username])? != 1 {
+            bail!("User does not exist");
+        }
+        tx.commit()?;
         Ok(())
     }
     pub fn enrollment(&self) -> Result<String> {
@@ -115,8 +183,63 @@ impl Store {
 mod tests {
     use super::*;
     #[test]
+    fn legacy_password_migrates_once_without_losing_workers() {
+        let dir = crate::test_support::tempdir();
+        let store = Store::open(dir.path()).unwrap();
+        let hash = security::hash_password("the original password").unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO settings VALUES ('password',?1)", [&hash])
+            .unwrap();
+        let key = store.enrollment().unwrap();
+        let (worker, credential) = store.enroll(&key, "desktop").unwrap();
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.user("admin").unwrap().unwrap().password_hash, hash);
+        assert_eq!(store.worker_for_token(&credential).unwrap(), Some(worker));
+        let left: i64 = store
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key='password'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+        store.set_user_password("admin", "changed hash").unwrap();
+        drop(store);
+        assert_eq!(
+            Store::open(dir.path())
+                .unwrap()
+                .user("admin")
+                .unwrap()
+                .unwrap()
+                .password_hash,
+            "changed hash"
+        );
+    }
+    #[test]
+    fn usernames_are_normalized_and_last_account_is_protected() {
+        let dir = crate::test_support::tempdir();
+        let store = Store::open(dir.path()).unwrap();
+        store.set_user_password(" Alice ", "alice hash").unwrap();
+        assert_eq!(store.user("ALICE").unwrap().unwrap().username, "alice");
+        let old = store.user("alice").unwrap().unwrap().version;
+        store.set_user_password("alice", "new hash").unwrap();
+        assert_ne!(old, store.user("alice").unwrap().unwrap().version);
+        assert!(store.remove_user("alice").is_err());
+        assert!(store.set_user_password("bad name", "hash").is_err());
+        store.set_user_password("bob", "bob hash").unwrap();
+        store.remove_user("ALICE").unwrap();
+        assert!(store.user("alice").unwrap().is_none());
+    }
+    #[test]
     fn registration_is_single_use_and_revocable() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir();
         let db = Store::open(dir.path()).unwrap();
         let key = db.enrollment().unwrap();
         let (id, credential) = db.enroll(&key, "laptop").unwrap();
@@ -128,7 +251,7 @@ mod tests {
     }
     #[test]
     fn expired_registration_cannot_be_used() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir();
         let db = Store::open(dir.path()).unwrap();
         let key = db.enrollment().unwrap();
         db.0.lock()

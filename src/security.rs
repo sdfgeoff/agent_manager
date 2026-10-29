@@ -20,6 +20,19 @@ pub fn digest(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
+pub fn username(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+    {
+        bail!("Username must contain 1–64 letters, numbers, dots, underscores, or hyphens");
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
 pub fn hash_password(password: &str) -> Result<String> {
     if password.len() < 12 || password.len() > 1024 {
         bail!("Password must contain 12–1024 bytes");
@@ -104,7 +117,7 @@ mod tests {
     }
     #[test]
     fn credentials_are_private_and_atomic() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir();
         let path = dir.path().join("credential");
         private_write(&path, b"first").unwrap();
         private_write(&path, b"second").unwrap();

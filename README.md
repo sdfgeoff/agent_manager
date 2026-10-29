@@ -14,14 +14,14 @@ Build requires Rust (edition 2024), a C compiler, and standard Linux development
 
 ## Try locally
 
-1. Set a server password of at least 12 characters, then start the server:
+1. Create a login with a password of at least 12 characters, then start the server:
 
    ```sh
-   server --data-dir ~/.local/state/agentmanager-server set-password
+   server --data-dir ~/.local/state/agentmanager-server set-password --username geoff
    server --data-dir ~/.local/state/agentmanager-server
    ```
 
-2. Open `http://127.0.0.1:8080`, sign in, and click **Register worker**. The generated command looks like:
+2. Open `http://127.0.0.1:8080`, sign in with that username and password, and click **Register worker**. The generated command looks like:
 
    ```sh
    worker --host http://127.0.0.1:8080 --key SINGLE_USE_KEY
@@ -66,7 +66,7 @@ Build requires Rust (edition 2024), a C compiler, and standard Linux development
 
 3. Codex persists conversation history locally using its normal storage. After a worker restart, choose a saved session to resume it; a turn that was executing when the worker process stopped is not automatically restarted. If the Codex child process exits, the worker restarts it and reconnects. The server stores worker registrations, not transcripts. Browser authentication sessions are in memory and expire after seven days or a server restart.
 
-4. The session list contains sessions managed by this worker. A small metadata catalog beside the worker credential retains their ids, including empty sessions that Codex does not return from its history listing. Existing terminal and desktop sessions are not automatically imported. Live handover from another Codex process is outside this version's scope.
+4. The session list includes saved CLI, desktop, and app-server conversations across all project folders in the worker's Codex home (normally `~/.codex`). Run the worker as the same Linux user and with the same `CODEX_HOME` as your existing Codex sessions. A small metadata catalog beside the worker credential also preserves newly created empty sessions. History is paginated, with no working-folder filter. Live handover from another Codex process is outside this version's scope; stop using a conversation in its other client before resuming it here.
 
 5. Session settings let you change the model, reasoning effort, approval policy, and sandbox between tasks. Additional instructions and the working folder are selected when creating a session. Defaults come from the worker's existing Codex configuration unless explicitly overridden. Available models come from that worker's Codex installation; this application makes no model requests of its own.
 
@@ -78,9 +78,61 @@ Build requires Rust (edition 2024), a C compiler, and standard Linux development
 
 3. A worker can browse and create folders anywhere its Linux user can access, as requested. Full-access sessions can execute commands with that user's permissions. Treat the server account, worker credentials, and the server machine as access to those machines. Run workers as your usual user, not root.
 
-4. To reset the password, run `server --data-dir SAME_DIRECTORY set-password`, then restart the server. To generate a registration key without the UI, use `server --data-dir SAME_DIRECTORY registration-key`. For automated password setup, `set-password --stdin` reads one line; avoid putting passwords in command arguments.
+4. All named accounts share all workers and sessions. Manage logins on the server:
 
-5. Back up the server state directory and each worker's Codex home if needed. The default server directory is `.data/server` relative to the working directory; use an explicit `--data-dir` for a service. This is a single-user first version, without MFA, file uploads, or a full terminal. It has not had an independent security audit.
+   ```sh
+   server --data-dir SAME_DIRECTORY set-password --username alice
+   server --data-dir SAME_DIRECTORY users
+   server --data-dir SAME_DIRECTORY remove-user alice
+   ```
+
+   `set-password` creates an account or resets its password. Changes take effect without a restart; changing or removing an account invalidates that account's browser logins while other accounts and workers stay connected. The last account cannot be removed. Usernames are case-insensitive and accept letters, digits, dots, underscores, and hyphens. There is no public signup or separate browser account-administration role. For automated setup, `--stdin` reads one password line.
+
+   On upgrade from 0.1, the old shared password becomes the **admin** account automatically. `set-password` without `--username` continues to manage `admin`. Back up the database before downgrading; the new version migrates credentials out of the old settings table.
+
+5. Back up the server state directory and each worker's Codex home if needed. The default server directory is `.data/server` relative to the working directory; use an explicit `--data-dir` for a service. There is no MFA, file upload, or full terminal. It has not had an independent security audit.
+
+## GitHub releases and deployment
+
+1. GitHub-hosted CI checks formatting, Clippy, and tests on pushes and pull requests. Pushing a stable version tag such as `v0.2.0` builds standalone x86_64 Linux binaries for the server, worker, and Rust updater. The tag must match the version in `Cargo.toml`. A release is published only after all assets and `SHA256SUMS` have been uploaded. Production machines do not run CI jobs or need GitHub/SSH credentials.
+
+2. Bootstrap the updater once on the server: install the release's updater binary as `~/.local/bin/agentmanager-updater`, copy [update.example.json](deploy/update.example.json) to `~/.config/agentmanager/update.json`, and edit its absolute paths. Copy [agentmanager-update.service](deploy/agentmanager-update.service) into `~/.config/systemd/user/` and run `systemctl --user daemon-reload`. The updater runs as the same user that owns the server service and database.
+
+3. Create the webhook secret:
+
+   ```sh
+   server --data-dir SAME_DIRECTORY webhook-secret
+   ```
+
+   It saves a private `github-webhook.secret` file in the server data directory. Copy the printed secret into the GitHub repository's **Settings → Webhooks → Add webhook**. Use `https://YOUR_HOST/api/deploy/webhook`, content type `application/json`, SSL verification enabled, and **Releases** events only. Keep the secret out of Git, logs, and chat.
+
+4. Add a server-service drop-in with `systemctl --user edit agentmanager-server.service`:
+
+   ```ini
+   [Service]
+   Environment=AGENTMANAGER_DEPLOYMENT_SECRET_FILE=/absolute/path/to/server-data/github-webhook.secret
+   ```
+
+   Reload systemd and restart the server. The endpoint verifies GitHub's HMAC signature, repository, and stable release event before waking the local updater. The updater fetches the published release itself; webhook payloads never contain deployment commands. There is no polling timer.
+
+5. Publish a new version by updating `Cargo.toml` and `Cargo.lock`, committing, and pushing a matching tag:
+
+   ```sh
+   git tag v0.2.0
+   git push origin main v0.2.0
+   ```
+
+   The host verifies the asset checksum and version, stops the server, backs up its database and binary, installs the release atomically, and checks `/healthz`. A failed startup restores both the previous binary and its compatible database. Backups and staging live in the configured persistent state directory, never `/tmp`. Active worker tasks continue through a server restart; browser logins need to sign in again.
+
+6. To check or deploy manually:
+
+   ```sh
+   ~/.local/bin/agentmanager-updater --config ~/.config/agentmanager/update.json --check
+   systemctl --user start agentmanager-update.service
+   journalctl --user -u agentmanager-update.service --no-pager -n 50
+   ```
+
+   A missed webhook can be redelivered through GitHub, or handled with the manual command. Worker releases are downloaded separately and restarted when idle, so updates do not interrupt their active Codex tasks. The updater itself is bootstrapped separately from normal server releases.
 
 ## Development and validation
 
@@ -91,13 +143,6 @@ cargo test --locked
 node --check web/app.js
 ```
 
-The protocol integration uses [Codex app-server](https://learn.chatgpt.com/docs/app-server) over local stdio. Tested against Codex CLI 0.164.0. Tests exercise real HTTP/WebSocket routing, authorization, registration reuse/expiry, revocation, and a simulated Codex process. They do not send paid model requests. Optional ignored smoke tests check the installed Codex handshake, model catalog, and session lifecycle in a temporary Codex home.
+The protocol integration uses [Codex app-server](https://learn.chatgpt.com/docs/app-server) over local stdio. Tested against Codex CLI 0.164.0. Tests cover HTTP/WebSocket routing, account migration and revocation, cross-folder history, signed release notifications, and deployment rollback. They do not send paid model requests. Test state lives under `target/test-state`, not `/tmp`. Optional real Codex smoke checks run with `cargo test --test codex -- --ignored`.
 
-To run the optional browser test, install Playwright somewhere outside the project and use an installed Chromium:
-
-```sh
-npm install --prefix /tmp/agentmanager-browser playwright
-PLAYWRIGHT_MODULE=/tmp/agentmanager-browser/node_modules/playwright/index.mjs node tests/browser.mjs
-```
-
-It starts isolated test processes, checks two browsers including a phone viewport, and saves screenshots in a temporary directory. Set `CHROMIUM` if Chromium is not at `/usr/bin/chromium`, or `AGENTMANAGER_BIN_DIR=target/release` to exercise release binaries. To run the real Codex smoke checks: `cargo test --test codex -- --ignored`.
+Use Chrome DevTools for browser checks: sign in as two different accounts in isolated contexts, confirm both see the same workers and saved conversations from different folders, and answer an approval from one browser while watching the other update. Check the login and conversation at a phone viewport and inspect the console for errors. There is no npm, Playwright, or Node build/runtime dependency for the Rust binaries.

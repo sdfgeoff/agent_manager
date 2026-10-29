@@ -6,3 +6,5 @@
 .env
 .env.*
 /tests/fixtures/*.state.json
+github-webhook.secret
+/dist/

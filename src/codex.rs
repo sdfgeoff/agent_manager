@@ -167,6 +167,40 @@ impl Codex {
     pub fn status(&self) -> Value {
         json!({"alive":self.alive(),"requests":self.requests.lock().unwrap().values().collect::<Vec<_>>(),"active":*self.active.lock().unwrap()})
     }
+    pub async fn list_sessions(self: &Arc<Self>, params: Value) -> Result<Value> {
+        let mut filters = json!({"limit":params["limit"].as_u64().unwrap_or(50).clamp(1,100),"sortKey":"updated_at","sortDirection":"desc","sourceKinds":["cli","vscode","appServer","exec"],"modelProviders":[]});
+        if let Some(cursor) = params["cursor"].as_str() {
+            filters["cursor"] = json!(cursor);
+        }
+        // Deliberately omit cwd: history belongs to the whole Codex home,
+        // including CLI and desktop threads in unrelated project directories.
+        let mut page = self.call("thread/list", filters).await?;
+        if params["cursor"].as_str().is_none() {
+            let stored = page["data"]
+                .as_array()
+                .context("Codex returned an invalid session list")?;
+            let mut merged = HashMap::new();
+            for thread in self
+                .catalog
+                .empty_threads()
+                .into_iter()
+                .chain(stored.iter().cloned())
+            {
+                if let Some(id) = thread["id"].as_str() {
+                    merged.insert(id.to_owned(), thread);
+                }
+            }
+            let mut threads = merged.into_values().collect::<Vec<_>>();
+            threads.sort_by(|a, b| {
+                b["updatedAt"]
+                    .as_i64()
+                    .cmp(&a["updatedAt"].as_i64())
+                    .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+            });
+            page["data"] = json!(threads);
+        }
+        Ok(page)
+    }
     pub async fn call(self: &Arc<Self>, method: &str, params: Value) -> Result<Value> {
         if !self.alive() {
             bail!("Codex process exited; restart the worker");
@@ -186,6 +220,19 @@ impl Codex {
             .context("Codex request timed out; check the session before retrying")??;
         let value = value.map_err(|e| anyhow::anyhow!(e))?;
         self.catalog.record(method, &params, &value)?;
+        if matches!(
+            method,
+            "thread/start"
+                | "thread/name/set"
+                | "turn/start"
+                | "thread/archive"
+                | "thread/unarchive"
+                | "thread/fork"
+        ) {
+            let _ = self
+                .events
+                .send(json!({"method":"manager/sessionsChanged","params":{}}));
+        }
         Ok(value)
     }
     pub async fn respond(&self, params: Value) -> Result<Value> {

@@ -80,6 +80,15 @@ impl Catalog {
         let end = offset.saturating_add(limit).min(entries.len());
         json!({"data":entries[offset..end],"nextCursor":if end<entries.len() {Some(end.to_string())} else {None}})
     }
+    pub fn empty_threads(&self) -> Vec<Value> {
+        self.threads
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|thread| thread["preview"].as_str().unwrap_or_default().is_empty())
+            .cloned()
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -87,14 +96,14 @@ mod tests {
     use super::*;
     #[test]
     fn empty_sessions_and_names_survive_restart() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir();
         let path = dir.path().join("sessions.json");
         let catalog = Catalog::open(Some(path.clone())).unwrap();
         catalog
             .record(
                 "thread/start",
                 &json!({}),
-                &json!({"thread":{"id":"test","cwd":"/tmp","turns":[],"updatedAt":now()}}),
+                &json!({"thread":{"id":"test","cwd":"/projects/test","turns":[],"updatedAt":now()}}),
             )
             .unwrap();
         catalog

@@ -2,6 +2,7 @@ use crate::{Wire, now, security, store::Store};
 use anyhow::Result;
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{
         DefaultBodyLimit, Path, Request, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
@@ -46,8 +47,11 @@ fn rejected(status: StatusCode, text: &str) -> ApiError {
     ApiError(status, text.into())
 }
 
+#[derive(Clone)]
 struct Session {
     expires: i64,
+    username: String,
+    version: String,
 }
 struct Peer {
     generation: String,
@@ -64,13 +68,14 @@ pub struct App {
     pub store: Store,
     origin: String,
     secure: bool,
-    password: String,
+    dummy_password: String,
     sessions: Mutex<HashMap<String, Session>>,
     peers: Mutex<HashMap<String, Peer>>,
     pending: Mutex<HashMap<String, Pending>>,
     events: broadcast::Sender<Value>,
     attempts: Mutex<VecDeque<Instant>>,
     login_lock: tokio::sync::Semaphore,
+    deployment: Option<crate::webhook::Deployment>,
 }
 
 impl App {
@@ -81,30 +86,53 @@ impl App {
         }
     }
     pub fn new(store: Store, public_url: &str) -> Result<Arc<Self>> {
+        Self::with_deployment(store, public_url, None)
+    }
+    pub fn with_deployment(
+        store: Store,
+        public_url: &str,
+        deployment: Option<crate::webhook::Deployment>,
+    ) -> Result<Arc<Self>> {
         let url = security::origin(public_url)?;
-        let password = store.password()?.ok_or_else(|| {
-            anyhow::anyhow!("Set a password first: server --data-dir <DIR> set-password")
-        })?;
+        if store.users()?.is_empty() {
+            anyhow::bail!(
+                "Create an account first: server --data-dir <DIR> set-password --username <NAME>"
+            );
+        }
+        let dummy_password = security::hash_password(&security::token())?;
         Ok(Arc::new(Self {
             store,
             origin: url.origin().ascii_serialization(),
             secure: url.scheme() == "https",
-            password,
+            dummy_password,
             sessions: Mutex::new(HashMap::new()),
             peers: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             events: broadcast::channel(2048).0,
             attempts: Mutex::new(VecDeque::new()),
             login_lock: tokio::sync::Semaphore::new(2),
+            deployment,
         }))
     }
-    fn authorize(&self, headers: &HeaderMap) -> ApiResult<()> {
+    fn valid_session(&self, session: &Session) -> bool {
+        session.expires > now()
+            && self
+                .store
+                .user_version(&session.username)
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some(session.version.as_str())
+    }
+    fn authorize(&self, headers: &HeaderMap) -> ApiResult<String> {
         let key = cookie(headers)
             .ok_or_else(|| rejected(StatusCode::UNAUTHORIZED, "Sign in required"))?;
         let mut sessions = self.sessions.lock().unwrap();
         sessions.retain(|_, s| s.expires > now());
-        if sessions.contains_key(&security::digest(key)) {
-            Ok(())
+        if let Some(session) = sessions.get(&security::digest(key))
+            && self.valid_session(session)
+        {
+            Ok(session.username.clone())
         } else {
             Err(rejected(StatusCode::UNAUTHORIZED, "Sign in required"))
         }
@@ -158,6 +186,10 @@ fn cookie(headers: &HeaderMap) -> Option<&str> {
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route(
+            "/healthz",
+            get(|| async { Json(json!({"version":env!("CARGO_PKG_VERSION")})) }),
+        )
+        .route(
             "/",
             get(|| async { Html(include_str!("../web/index.html")) }),
         )
@@ -180,6 +212,7 @@ pub fn router(app: Arc<App>) -> Router {
             }),
         )
         .route("/api/login", post(login))
+        .route("/api/deploy/webhook", post(deployment_webhook))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/workers", get(workers))
@@ -216,8 +249,65 @@ async fn security_headers(request: Request, next: Next) -> Response {
     response
 }
 
+async fn deployment_webhook(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Response> {
+    let deployment = app
+        .deployment
+        .as_ref()
+        .ok_or_else(|| rejected(StatusCode::NOT_FOUND, "Deployment webhooks are not enabled"))?;
+    let signature = headers
+        .get("x-hub-signature-256")
+        .and_then(|s| s.to_str().ok())
+        .unwrap_or_default();
+    if !deployment.verify(signature, &body) {
+        return Err(rejected(
+            StatusCode::UNAUTHORIZED,
+            "Invalid webhook signature",
+        ));
+    }
+    let event = headers.get("x-github-event").and_then(|s| s.to_str().ok());
+    if event == Some("ping") {
+        return Ok(Json(json!({"ok":true})).into_response());
+    }
+    let payload: Value = serde_json::from_slice(&body)
+        .map_err(|_| rejected(StatusCode::BAD_REQUEST, "Invalid webhook payload"))?;
+    if payload["repository"]["full_name"].as_str() != Some(&deployment.repository) {
+        return Err(rejected(
+            StatusCode::FORBIDDEN,
+            "Unexpected release repository",
+        ));
+    }
+    if event != Some("release")
+        || payload["action"] != "published"
+        || payload["release"]["draft"] == true
+        || payload["release"]["prerelease"] == true
+    {
+        return Ok(Json(json!({"ignored":true})).into_response());
+    }
+    if crate::updater::version(payload["release"]["tag_name"].as_str().unwrap_or_default()).is_err()
+    {
+        return Err(rejected(
+            StatusCode::BAD_REQUEST,
+            "Expected a stable version tag",
+        ));
+    }
+    match deployment.notify.try_send(()) {
+        Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {
+            Ok((StatusCode::ACCEPTED, Json(json!({"queued":true}))).into_response())
+        }
+        Err(_) => Err(rejected(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Deployment listener is unavailable",
+        )),
+    }
+}
+
 #[derive(Deserialize)]
 struct Login {
+    username: String,
     password: String,
 }
 async fn login(
@@ -231,13 +321,30 @@ async fn login(
         .login_lock
         .try_acquire()
         .map_err(|_| rejected(StatusCode::TOO_MANY_REQUESTS, "Sign in busy; try again"))?;
-    let hash = app.password.clone();
+    let user = match security::username(&body.username) {
+        Ok(username) => app.store.user(&username)?,
+        Err(_) => None,
+    };
+    let hash = user
+        .as_ref()
+        .map(|u| u.password_hash.clone())
+        .unwrap_or_else(|| app.dummy_password.clone());
     let valid =
         tokio::task::spawn_blocking(move || security::verify_password(&body.password, &hash))
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-    if !valid {
-        return Err(rejected(StatusCode::UNAUTHORIZED, "Incorrect password"));
+    if !valid || user.is_none() {
+        return Err(rejected(
+            StatusCode::UNAUTHORIZED,
+            "Incorrect username or password",
+        ));
+    }
+    let user = user.unwrap();
+    if app.store.user_version(&user.username)?.as_deref() != Some(&user.version) {
+        return Err(rejected(
+            StatusCode::UNAUTHORIZED,
+            "Incorrect username or password",
+        ));
     }
     let token = security::token();
     {
@@ -250,12 +357,14 @@ async fn login(
             security::digest(&token),
             Session {
                 expires: now() + 604800,
+                username: user.username.clone(),
+                version: user.version,
             },
         );
     }
     Ok((
         [(header::SET_COOKIE, app.cookie(&token, 604800))],
-        Json(json!({"ok":true})),
+        Json(json!({"ok":true,"username":user.username})),
     )
         .into_response())
 }
@@ -271,8 +380,10 @@ async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Re
         .into_response())
 }
 async fn me(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    app.authorize(&headers)?;
-    Ok(Json(json!({"ok":true,"origin":app.origin})))
+    let username = app.authorize(&headers)?;
+    Ok(Json(
+        json!({"ok":true,"origin":app.origin,"username":username}),
+    ))
 }
 async fn workers(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     app.authorize(&headers)?;
@@ -433,7 +544,7 @@ async fn events(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Re
                 .lock()
                 .unwrap()
                 .get(&key)
-                .is_some_and(|s| s.expires > now());
+                .is_some_and(|s| state.valid_session(s));
             std::future::ready(valid)
         })
         .map(|value| {
