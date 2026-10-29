@@ -20,6 +20,13 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build embedded frontend
+        run: npm ci --prefix web && npm run check --prefix web && npm test --prefix web && npm run build --prefix web
       - run: rustup toolchain install stable --profile minimal --component clippy --component rustfmt
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --locked --all-targets -- -D warnings
@@ -35,7 +42,7 @@ jobs:
           message="${message//$'\n'/'%0A'}"
           printf '::error title=Rust tests failed::%s\n' "$message"
           exit 1
-      - run: node --check web/app.js && node --check web/board.js
+      - run: node --check web/public/sw.js
 
   release:
     needs: check
@@ -50,6 +57,13 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build embedded frontend
+        run: npm ci --prefix web && npm run build --prefix web
       - name: Check release tag
         shell: bash
         run: |

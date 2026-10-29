@@ -5,24 +5,6 @@ use axum::routing::post;
 pub(super) fn routes() -> Router<Arc<App>> {
     Router::new()
         .route(
-            "/board.js",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                    include_str!("../../web/board.js"),
-                )
-            }),
-        )
-        .route(
-            "/board.css",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-                    include_str!("../../web/board.css"),
-                )
-            }),
-        )
-        .route(
             "/api/board/{operation}",
             post(operation).layer(DefaultBodyLimit::max(29 * 1024 * 1024)),
         )

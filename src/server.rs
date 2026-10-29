@@ -1,4 +1,9 @@
+mod accounts;
 mod board_http;
+mod push_http;
+mod frontend {
+    include!(concat!(env!("OUT_DIR"), "/frontend.rs"));
+}
 use crate::{Wire, now, security, store::Store};
 use anyhow::Result;
 use axum::{
@@ -11,7 +16,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{
-        Html, IntoResponse, Response, Sse,
+        IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
     routing::{delete, get, post},
@@ -81,6 +86,7 @@ pub struct App {
     deployment: Option<crate::webhook::Deployment>,
     agent_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     board_wake: tokio::sync::Notify,
+    push: crate::push::Push,
 }
 
 impl App {
@@ -105,6 +111,7 @@ impl App {
             );
         }
         let dummy_password = security::hash_password(&security::token())?;
+        let push = crate::push::Push::new(&store, &url.origin().ascii_serialization())?;
         Ok(Arc::new(Self {
             store,
             origin: url.origin().ascii_serialization(),
@@ -119,6 +126,7 @@ impl App {
             deployment,
             agent_locks: Mutex::new(HashMap::new()),
             board_wake: tokio::sync::Notify::new(),
+            push,
         }))
     }
     fn valid_session(&self, session: &Session) -> bool {
@@ -192,34 +200,22 @@ fn cookie(headers: &HeaderMap) -> Option<&str> {
 
 pub fn router(app: Arc<App>) -> Router {
     board_http::start(&app);
+    push_http::start(&app);
     Router::new()
         .merge(board_http::routes())
         .route(
             "/healthz",
             get(|| async { Json(json!({"version":env!("CARGO_PKG_VERSION")})) }),
         )
-        .route(
-            "/",
-            get(|| async { Html(include_str!("../web/index.html")) }),
-        )
-        .route(
-            "/app.js",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                    include_str!("../web/app.js"),
-                )
-            }),
-        )
-        .route(
-            "/style.css",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-                    include_str!("../web/style.css"),
-                )
-            }),
-        )
+        .merge(accounts::routes())
+        .merge(push_http::routes())
+        .route("/", get(frontend_asset))
+        .route("/assets/{*path}", get(frontend_asset))
+        .route("/sw.js", get(frontend_asset))
+        .route("/manifest.webmanifest", get(frontend_asset))
+        .route("/icon.svg", get(frontend_asset))
+        .route("/icon-192.png", get(frontend_asset))
+        .route("/icon-512.png", get(frontend_asset))
         .route("/api/login", post(login))
         .route("/api/deploy/webhook", post(deployment_webhook))
         .route("/api/logout", post(logout))
@@ -234,6 +230,15 @@ pub fn router(app: Arc<App>) -> Router {
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(security_headers))
         .with_state(app)
+}
+
+async fn frontend_asset(request: Request) -> Response {
+    let name = request.uri().path().trim_start_matches('/');
+    let name = if name.is_empty() { "index.html" } else { name };
+    match frontend::asset(name) {
+        Some((mime, bytes)) => ([(header::CONTENT_TYPE, mime)], bytes).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn security_headers(request: Request, next: Next) -> Response {
@@ -380,6 +385,7 @@ async fn login(
 async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Response> {
     app.csrf(&headers)?;
     if let Some(key) = cookie(&headers) {
+        app.store.push_logout(&security::digest(key))?;
         app.sessions.lock().unwrap().remove(&security::digest(key));
     }
     Ok((

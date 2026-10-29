@@ -134,17 +134,28 @@ fn publish(
     let mut recipients = BTreeSet::new();
 
     // Mentions deliberately resubscribe. Match complete ASCII handles, never substrings.
-    for word in body.split(|c: char| !(c.is_ascii_alphanumeric() || "@_-".contains(c))) {
-        if let Some(name) = word.strip_prefix('@')
-            && let Some(id_actor) = tx
-                .query_row(
-                    "SELECT id FROM board_actors WHERE handle=?1",
-                    [name.to_lowercase()],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()?
-        {
-            subscribe(tx, &id_actor, "topic", id, true)?;
+    for word in body.split(|c: char| !(c.is_ascii_alphanumeric() || "@_.-".contains(c))) {
+        if let Some(mut name) = word.strip_prefix('@') {
+            loop {
+                let mentioned = tx
+                    .query_row(
+                        "SELECT id FROM board_actors a WHERE handle=?1 AND (kind='agent' OR EXISTS(SELECT 1 FROM users u WHERE a.id='human:'||u.username))",
+                        [name.to_lowercase()],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?;
+                if let Some(id_actor) = mentioned {
+                    subscribe(tx, &id_actor, "topic", id, true)?;
+                    break;
+                }
+                // Try the complete handle first; only trailing sentence punctuation
+                // may be removed. Never turn an unknown @bob.example into @bob.
+                if let Some(shorter) = name.strip_suffix('.') {
+                    name = shorter;
+                } else {
+                    break;
+                }
+            }
         }
     }
     for row in tx.prepare("SELECT actor FROM board_subscriptions WHERE subscribed=1 AND ((kind='topic' AND target=?1) OR (kind='channel' AND target=?2 AND ?3='created'))")?.query_map(params![id,channel,kind],|r|r.get::<_,String>(0))?{recipients.insert(row?);}
@@ -335,8 +346,8 @@ impl Store {
             }
             "overview" => {
                 let people = tx
-                    .prepare("SELECT id,handle,name,kind FROM board_actors ORDER BY kind,name")?
-                    .query_map([], actor_row)?
+                    .prepare("SELECT a.id,a.handle,a.name,a.kind,(a.kind='agent' OR EXISTS(SELECT 1 FROM users u WHERE a.id='human:'||u.username)) FROM board_actors a ORDER BY kind,name")?
+                    .query_map([],|r|{let mut value=json!(actor_row(r)?);value["active"]=json!(r.get::<_,bool>(4)?);Ok(value)})?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 let channels=tx.prepare("SELECT c.id,c.name,c.description,COALESCE(s.subscribed,0) FROM board_channels c LEFT JOIN board_subscriptions s ON s.kind='channel' AND s.target=c.id AND s.actor=?1 ORDER BY c.name")?.query_map([&actor.id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"name":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,"subscribed":r.get::<_,bool>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 json!({"me":actor,"people":people,"channels":channels,"statuses":STATUSES})
@@ -461,6 +472,7 @@ impl Store {
                 if assignee != old["assignee"].as_str()
                     && let Some(a) = assignee
                 {
+                    ensure!(tx.query_row("SELECT EXISTS(SELECT 1 FROM board_actors a WHERE id=?1 AND (kind='agent' OR EXISTS(SELECT 1 FROM users u WHERE a.id='human:'||u.username)))",[a],|r|r.get::<_,bool>(0))?,"Assignee is not an active participant");
                     subscribe(&tx, a, "topic", id, true)?;
                 }
                 tx.execute("UPDATE board_topics SET title=?1,status=?2,assignee=?3,updated_at=?4 WHERE id=?5",params![title,status,assignee,now(),id])?;
@@ -786,6 +798,95 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+    #[test]
+    fn dotted_mentions_match_complete_handles_before_sentence_punctuation() {
+        let (_dir, s, a, b) = setup();
+        s.set_user_password("bob.example", "a-test-password")
+            .unwrap();
+        let dotted = s.board_human("bob.example").unwrap();
+        let t = s
+            .board(
+                &a,
+                "create_topic",
+                &json!({
+                    "channel": 1, "body": "@bob.example. and @bob."
+                }),
+            )
+            .unwrap();
+        assert_eq!(s.board_pending(&b.id).unwrap().len(), 1);
+        assert_eq!(s.board_pending(&dotted.id).unwrap().len(), 1);
+        s.board(
+            &b,
+            "set_subscription",
+            &json!({"kind":"topic","target":t["id"],"subscribed":false}),
+        )
+        .unwrap();
+        s.board(
+            &a,
+            "post_reply",
+            &json!({
+                "topic":t["id"], "body":"@bob.unknown and mail@bob.example"
+            }),
+        )
+        .unwrap();
+        assert_eq!(s.board_pending(&b.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn removing_a_human_retains_authorship_but_stops_mentions_and_new_assignment() {
+        let (_dir, s, a, b) = setup();
+        let t = s
+            .board(
+                &a,
+                "create_topic",
+                &json!({"channel":1,"body":"Keep my authorship"}),
+            )
+            .unwrap();
+        s.board(
+            &b,
+            "update_topic",
+            &json!({"topic":t["id"],"assignee":a.id}),
+        )
+        .unwrap();
+        let before = s.board_pending(&a.id).unwrap().len();
+        s.remove_user("alice").unwrap();
+        s.board(
+            &b,
+            "post_reply",
+            &json!({"topic":t["id"],"body":"@alice is no longer an active account"}),
+        )
+        .unwrap();
+        assert_eq!(s.board_pending(&a.id).unwrap().len(), before);
+        let overview = s.board(&b, "overview", &json!({})).unwrap();
+        assert_eq!(
+            overview["people"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == a.id)
+                .unwrap()["active"],
+            false
+        );
+        assert_eq!(
+            s.board(&b, "read_topic", &json!({"topic":t["id"]}))
+                .unwrap()["author"],
+            a.id
+        );
+        s.board(
+            &b,
+            "update_topic",
+            &json!({"topic":t["id"],"assignee":null}),
+        )
+        .unwrap();
+        assert!(
+            s.board(
+                &b,
+                "update_topic",
+                &json!({"topic":t["id"],"assignee":a.id})
+            )
+            .is_err()
         );
     }
     #[test]

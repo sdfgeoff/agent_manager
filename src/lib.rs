@@ -3,6 +3,7 @@ pub mod board;
 pub mod catalog;
 pub mod codex;
 pub mod mcp;
+pub mod push;
 pub mod security;
 pub mod server;
 pub mod store;

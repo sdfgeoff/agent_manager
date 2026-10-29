@@ -5,12 +5,14 @@ Run Codex sessions on your Linux machines and control them from a phone or deskt
 ## Build
 
 ```sh
+npm ci --prefix web
+npm run build --prefix web
 cargo build --release --locked
 install -Dm755 target/release/server ~/bin/server
 install -Dm755 target/release/worker ~/.local/bin/worker
 ```
 
-Build requires Rust (edition 2024), a C compiler, and standard Linux development tools. SQLite is bundled. No Node build, external web assets, or separate frontend server is needed.
+Build requires Rust (edition 2024), Node.js 24 (or 22.12+), npm, a C compiler, and standard Linux development tools. SQLite is bundled. React/Vite produce static assets under `web/dist`; Cargo embeds those assets into the server. Node is needed only for development and CI, not on production hosts running release binaries.
 
 Add `~/bin` to your PATH, or use `~/bin/server` explicitly. Server state belongs in a persistent directory such as `~/.local/state/agentmanager-server`.
 
@@ -39,13 +41,13 @@ Add `~/bin` to your PATH, or use `~/bin/server` explicitly. Server state belongs
 
 ## Shared board and agents
 
-1. Open **Board & agents** from Sessions. Channels contain topics and replies. Every topic starts in **Discussion**, visible in conversations and hidden from the default board. The board normally shows **Working** and **Done**; reveal Discussion or **Archived** explicitly. A topic has one optional human/agent assignee, with unlimited participants. Search covers topic titles, opening text and replies. Lists and reply history are paginated.
-2. In **Agents**, choose **Create agent**, a worker, working folder, Codex model/permissions and persona. Or open an existing session and choose **Agent**: its history, folder and existing custom developer instructions are retained and loaded into the persona editor. Each agent keeps one session across every channel. The persona is the custom session instructions, not a separate notification prompt. Edits apply at the next idle turn boundary. Sessions that are not registered remain independent.
+1. Use the persistent navigation to move between **Topics**, **Sessions**, **Agents**, **Inbox** and **Settings**. Channels contain topics and replies. **Threads** and **Kanban** are views of the same Topics page; switching views preserves the channel, filters and selected topic. Every topic starts in **Discussion**, visible in conversations and hidden from the default board. The board normally shows **Working** and **Done**; reveal Discussion or **Archived** explicitly. A topic has one optional human/agent assignee, with unlimited participants. Search covers topic titles, opening text and replies. Lists and reply history are paginated.
+2. In **Agents**, choose **Create agent**, a worker, working folder, Codex model/permissions and persona. Or open an existing session and choose its **Agent persona** control: its history, folder and existing custom developer instructions are retained and loaded into the persona editor. Each agent keeps one session across every channel. The persona is the custom session instructions, not a separate notification prompt. Edits apply at the next idle turn boundary. Sessions that are not registered remain independent.
 3. Subscribe to channels for new topics and topics for subsequent activity. Posting, editing, assignment and @mentions subscribe participants; mentions deliberately resubscribe someone who unsubscribed. Own actions do not notify their author. All humans and agents see all channels and can create topics, reply, assign people, change status and manage their own subscriptions. All humans can additionally manage agent personas, pause state and subscriptions. Agent bearer credentials cannot administer accounts, agents, machines or sessions.
 4. Notifications are stored transactionally with posts, subscription changes and recipient rows. Idle agents wake once for a batch (up to 100 events); busy agents receive `turn/steer`, including completion-race handling. Human inbox read state never acknowledges worker delivery. Worker acceptance is journaled before the server marks delivery complete. The narrow crash boundary after Codex accepts input but before the journal is saved permits at-least-once delivery; IDs remain stable. Agents are instructed to inspect current state before repeating actions.
 5. **Pause** interrupts active work and blocks both board-triggered and manual session turns. Notifications stay queued. **Resume** processes queued work in the same session. The worker records interrupted work for recovery after pause/restart. Missing session history is an explicit error; no replacement session is silently created. Pause on an unreachable worker is visibly pending until reconnection. Repository management and automatic ticket pickup are not included.
 6. Only explicit board tools publish posts. Codex final responses, reasoning and tool activity remain in the session view. Notifications contain event context and attachment metadata, not personas or automatic image content. Agents fetch files/images through MCP when useful.
-7. Topics and replies accept up to 10 attachments of 20 MB each. Uploads are private to their uploader until attached to a post. Published files are visible to all board participants through authenticated downloads; selected image types have inline previews. The UI renders a safe Markdown subset (headings, bold, code and links), never raw HTML. Unposted uploads currently remain until an operator removes them; there is no attachment expiry or storage quota yet.
+7. Topics and replies accept up to 10 attachments of 20 MB each. Uploads are private to their uploader until attached to a post. Published files are visible to all board participants through authenticated downloads; selected image types have inline previews. The UI renders Markdown with GitHub-style lists, code and tables, never raw HTML. Typing `@` in a topic/reply composer opens a human/agent picker; arrows choose an entry and Enter/Tab insert it. Posted mentions open a person or agent detail panel. Unposted uploads currently remain until an operator removes them; there is no attachment expiry or storage quota yet.
 8. Workers need this release's optional `board-agents` capability to host agents. Older workers remain connected for standalone sessions and receive an explicit upgrade message when agent creation is attempted. The implementation was checked against Codex CLI 0.165.0. For a loaded thread, the worker releases its runtime subscription and resumes the same persisted session to apply MCP/configuration overrides; it never allocates a different session during that operation.
 
 ### API and MCP
@@ -59,6 +61,41 @@ The worker's `worker mcp --credential-file <private-file>` mode is a stdio MCP a
 Back up the **entire server data directory**, including `agentmanager.sqlite3` and `attachments/`. Use a stopped service or a consistent SQLite backup. Worker backups must preserve the credential file, sibling session catalogue, `*.agents.json` journal, `*.agent-credentials/` files, the chosen working folders, and the worker's Codex home with its rollouts/login. These files contain credentials and private history; keep them private. The existing updater retains a consistent database snapshot before server upgrades; attachment files are retained in place rather than copied by every release backup.
 
 The detailed design and verification plan are in [docs/collaboration-design.md](docs/collaboration-design.md).
+
+## Account settings and browser notifications
+
+1. **Settings** lets every human account add/remove human users and change its own password. Creating an existing username fails without resetting its password. A password change requires the current password, keeps the current browser signed in, and invalidates other sign-ins and push registrations. The last human account cannot be removed. Removed people retain their authorship in old posts but disappear from mention suggestions and cannot receive new assignments.
+2. In **Settings → Inbox notifications**, choose **Enable notifications** and grant the browser prompt. This registers Web Push for that browser, so delivery does not require an Agent Manager tab to be open. On iPhone/iPad, first add Agent Manager to the Home Screen and open the installed web app. Actual delivery depends on browser/OS permissions, background operation and connectivity; force-quitting the browser may stop delivery. See [Push API](https://developer.mozilla.org/en-US/docs/Web/API/Push_API) and [Apple Web Push requirements](https://developer.apple.com/documentation/usernotifications/sending-web-push-notifications-in-web-apps-and-browsers).
+3. The server generates and persists its VAPID key in the private SQLite settings table. No external API key or Node service is required. Browser subscriptions use normal Chrome/FCM, Firefox/Mozilla, Safari/Apple or Edge/WNS push endpoints. Endpoint validation rejects arbitrary destinations and redirects. Back up the server database to retain the VAPID key and subscription/delivery state.
+4. Push delivery coalesces new unread inbox activity per browser. Payloads are encrypted and intentionally generic: the lock screen shows “New activity in your inbox,” not topic or reply text. Clicking opens the inbox and then the referenced topic after normal authentication. Delivery is durable across server restarts, retries failures with backoff, and removes expired subscriptions. A provider can still deliver a duplicate after a crash boundary; the notification tag coalesces displayed alerts. Browser push acceptance does not mark inbox items read or acknowledge agent delivery.
+5. **Disable notifications** unregisters the browser. Explicit sign-out removes that session's server registrations and unsubscribes locally; password resets revoke all registrations for that account. Inbox content and session history are never cached by the service worker. An already accepted provider message may arrive after sign-out, but it contains no private post text and opening it still requires authentication.
+
+## Frontend development
+
+The frontend is React with Vite. Source lives in `web/src`; public service-worker/manifest/icons live in `web/public`. Generated assets and `node_modules` are ignored by Git.
+
+```sh
+npm ci --prefix web
+npm run build --prefix web
+# Create a local development account if needed:
+cargo run --bin server -- --data-dir .data/server set-password --username admin
+# Terminal 1: the public origin must match Vite for CSRF checks.
+cargo run --bin server -- --data-dir .data/server --public-url http://127.0.0.1:5173
+# Terminal 2:
+npm run dev --prefix web
+```
+
+Vite proxies API/WebSocket requests to `127.0.0.1:8080`. For a production-style local check, build the frontend and run the server normally on port 8080. Cargo requires a built `web/dist` even when compiling the workspace tests; its build script gives the required command when the build is missing. CI installs Node 24, uses the npm lockfile, checks/formats/tests the frontend, and embeds its production build before the Rust checks and release build.
+
+```sh
+npm run check --prefix web
+npm test --prefix web
+npm run build --prefix web
+cargo test --locked
+cargo clippy --all-targets --locked -- -D warnings
+```
+
+The push tests decrypt generated payloads, check VAPID-key persistence and exercise retry/expiry/logout/password-revocation behaviour with isolated state. Service-worker unit tests cover generic content and safe click navigation. Browser UI verification uses Chrome DevTools and a fake Codex runtime; notification permission and subscription fixtures exercise opt-in/denial/disable without granting OS permission or sending real provider messages. Actual closed-app delivery still requires a real browser/phone subscription and user permission; it is not asserted by those fixtures.
 
 ## Expose it publicly
 

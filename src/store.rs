@@ -49,6 +49,7 @@ impl Store {
         tx.execute("DELETE FROM settings WHERE key='password'", [])?;
         tx.commit()?;
         crate::board::migrate(&db)?;
+        crate::push::migrate(&db)?;
         Ok(Self(Mutex::new(db), dir.to_path_buf()))
     }
     pub fn set_password(&self, hash: &str) -> Result<()> {
@@ -70,8 +71,64 @@ impl Store {
             "INSERT OR IGNORE INTO board_actors VALUES(?1,?2,?2,'human')",
             params![format!("human:{username}"), username],
         )?;
+        tx.execute(
+            "DELETE FROM push_subscriptions WHERE username=?1",
+            [&username],
+        )?;
         tx.commit()?;
         Ok(())
+    }
+    pub fn create_user_password(&self, username: &str, hash: &str) -> Result<()> {
+        let username = security::username(username)?;
+        let mut db = self.0.lock().unwrap();
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE username=?1)",
+            [&username],
+            |r| r.get::<_, bool>(0),
+        )? {
+            bail!("Username already exists");
+        }
+        if tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM board_actors WHERE handle=?1 AND kind='agent')",
+            [&username],
+            |r| r.get::<_, bool>(0),
+        )? {
+            bail!("That handle belongs to an agent");
+        }
+        tx.execute(
+            "INSERT INTO users VALUES(?1,?2,?3,?4)",
+            params![username, hash, security::token(), now()],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO board_actors VALUES(?1,?2,?2,'human')",
+            params![format!("human:{username}"), username],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn change_user_password(
+        &self,
+        username: &str,
+        expected: &str,
+        hash: &str,
+    ) -> Result<String> {
+        let mut db = self.0.lock().unwrap();
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let version = security::token();
+        if tx.execute(
+            "UPDATE users SET password_hash=?1,version=?2 WHERE username=?3 AND version=?4",
+            params![hash, version, username, expected],
+        )? != 1
+        {
+            bail!("Account changed; sign in and try again");
+        }
+        tx.execute(
+            "DELETE FROM push_subscriptions WHERE username=?1",
+            [username],
+        )?;
+        tx.commit()?;
+        Ok(version)
     }
     pub fn user(&self, username: &str) -> Result<Option<UserCredential>> {
         let username = security::username(username)?;
@@ -124,9 +181,13 @@ impl Store {
         if count <= 1 {
             bail!("Cannot remove the last account");
         }
-        if tx.execute("DELETE FROM users WHERE username=?1", [username])? != 1 {
+        if tx.execute("DELETE FROM users WHERE username=?1", [&username])? != 1 {
             bail!("User does not exist");
         }
+        tx.execute(
+            "UPDATE board_subscriptions SET subscribed=0 WHERE actor=?1",
+            [format!("human:{username}")],
+        )?;
         tx.commit()?;
         Ok(())
     }

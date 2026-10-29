@@ -608,3 +608,157 @@ async fn global_authentication_rate_limit_is_enforced() {
         );
     }
 }
+
+#[tokio::test]
+async fn browser_account_management_keeps_current_session_and_revokes_other_signins() {
+    let server = Server::new().await;
+    let first = server.login().await;
+    let second = server.login().await;
+    let request = |path: &str, body: Value| {
+        server
+            .client
+            .post(format!("{}{}", server.url, path))
+            .header("Cookie", &first)
+            .header("Origin", &server.url)
+            .header("X-Agentmanager", "1")
+            .json(&body)
+    };
+    let added = request(
+        "/api/settings/users",
+        json!({"username":"alice","password":"alice initial password"}),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(added.status(), StatusCode::OK);
+    let duplicate = request(
+        "/api/settings/users",
+        json!({"username":"alice","password":"overwrite should fail"}),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+    let alice = server.login_as("alice", "alice initial password").await;
+    assert_eq!(server.client.post(format!("{}/api/settings/password",server.url)).header("Cookie",&first).json(&json!({"current_password":"test password long enough","new_password":"updated password long enough"})).send().await.unwrap().status(),StatusCode::FORBIDDEN);
+    let wrong=request("/api/settings/password",json!({"current_password":"incorrect password","new_password":"updated password long enough"})).send().await.unwrap();
+    assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+    let changed=request("/api/settings/password",json!({"current_password":"test password long enough","new_password":"updated password long enough"})).send().await.unwrap();
+    assert_eq!(changed.status(), StatusCode::OK);
+    let current = changed.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    for cookie in [&first, &second] {
+        assert_eq!(
+            server
+                .client
+                .get(format!("{}/api/me", server.url))
+                .header("Cookie", cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    for cookie in [&current, &alice] {
+        assert_eq!(
+            server
+                .client
+                .get(format!("{}/api/settings/users", server.url))
+                .header("Cookie", cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    let removed = server
+        .client
+        .delete(format!("{}/api/settings/users/alice", server.url))
+        .header("Cookie", &current)
+        .header("Origin", &server.url)
+        .header("X-Agentmanager", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
+    assert_eq!(
+        server
+            .client
+            .get(format!("{}/api/me", server.url))
+            .header("Cookie", &alice)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let last = server
+        .client
+        .delete(format!("{}/api/settings/users/admin", server.url))
+        .header("Cookie", &current)
+        .header("Origin", &server.url)
+        .header("X-Agentmanager", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(last.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn push_and_settings_endpoints_require_human_cookie_and_csrf() {
+    let server = Server::new().await;
+    let cookie = server.login().await;
+    let response = server
+        .client
+        .get(format!("{}/api/push", server.url))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let info = response.json::<Value>().await.unwrap();
+    assert!(info["publicKey"].as_str().unwrap().len() > 70);
+    assert!(info.get("privateKey").is_none());
+    for path in [
+        "/api/settings/users",
+        "/api/push/status",
+        "/api/push/unsubscribe",
+    ] {
+        assert_eq!(server.client.post(format!("{}{}",server.url,path)).header("Cookie",&cookie).json(&json!({"username":"alice","password":"alice initial password","endpoint":"https://fcm.googleapis.com/wp/test"})).send().await.unwrap().status(),StatusCode::FORBIDDEN);
+    }
+    for path in ["/api/settings/users", "/api/push"] {
+        assert_eq!(
+            server
+                .client
+                .get(format!("{}{}", server.url, path))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let response = server
+        .client
+        .get(format!("{}/sw.js", server.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/javascript")
+    );
+    let source = response.text().await.unwrap();
+    assert!(source.contains("notificationclick") && source.contains("showNotification"));
+    assert!(!source.contains("caches.open"));
+}
