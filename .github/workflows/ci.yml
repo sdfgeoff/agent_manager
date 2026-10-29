@@ -12,17 +12,14 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  TMPDIR: ${{ github.workspace }}/target/build-tmp
 
 jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
-      - run: mkdir -p "$TMPDIR"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - run: mkdir -p "$TMPDIR"
       - run: rustup toolchain install stable --profile minimal --component clippy --component rustfmt
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --locked --all-targets -- -D warnings
@@ -50,11 +47,9 @@ jobs:
       RELEASE_TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - run: mkdir -p "$TMPDIR"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - run: mkdir -p "$TMPDIR"
       - name: Check release tag
         shell: bash
         run: |
