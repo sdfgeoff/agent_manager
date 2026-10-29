@@ -22,6 +22,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - run: mkdir -p "$TMPDIR"
       - run: rustup toolchain install stable --profile minimal --component clippy --component rustfmt
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --locked --all-targets -- -D warnings
@@ -53,6 +54,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - run: mkdir -p "$TMPDIR"
       - name: Check release tag
         shell: bash
         run: |
