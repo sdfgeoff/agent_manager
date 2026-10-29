@@ -1,0 +1,8 @@
+/target/
+/.data/
+*.sqlite3*
+*.credential.json
+*.sessions.json
+.env
+.env.*
+/tests/fixtures/*.state.json

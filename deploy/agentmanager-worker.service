@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Manager worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Set PATH to include the directory containing your Codex CLI installation.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/worker
+Restart=on-failure
+RestartSec=5
+UMask=0077
+# Run as your normal user: sessions need your projects, Codex login, and tools.
+
+[Install]
+WantedBy=default.target

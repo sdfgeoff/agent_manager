@@ -1,0 +1,19 @@
+[Unit]
+Description=Agent Manager server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/server --listen 127.0.0.1:8080 --public-url https://agents.example.com --data-dir %h/.local/state/agentmanager-server
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/agentmanager-server
+
+[Install]
+WantedBy=default.target

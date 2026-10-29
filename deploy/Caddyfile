@@ -1,0 +1,9 @@
+# Point this hostname's DNS A record at your static IP.
+# Forward TCP ports 80 and 443 to this server. Keep port 8080 private.
+agents.example.com {
+    encode zstd gzip
+    header Strict-Transport-Security "max-age=31536000"
+    reverse_proxy 127.0.0.1:8080 {
+        flush_interval -1
+    }
+}
