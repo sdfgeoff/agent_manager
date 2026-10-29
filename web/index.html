@@ -7,7 +7,7 @@
 </section>
 <div id="app" class="app" hidden>
   <aside id="sidebar"><div class="brand"><span class="brandmark small">a<span>m</span></span><strong>Agent Manager</strong><button id="close-menu" class="icon mobile" aria-label="Close menu">×</button></div>
-    <div class="sidebar-body"><div class="section-label">MACHINE <span id="worker-count"></span></div><select id="worker-select" aria-label="Worker machine"></select><div class="worker-actions"><button id="add-worker" class="text-button">＋ Register worker</button><button id="revoke-worker" class="text-button danger" title="Revoke selected worker">Revoke</button></div>
+    <div class="sidebar-body"><div class="section-label">MACHINE <span id="worker-count"></span></div><select id="worker-select" aria-label="Worker machine"></select><div id="worker-version" class="worker-version" aria-live="polite" hidden></div><div class="worker-actions"><button id="add-worker" class="text-button">＋ Register worker</button><button id="revoke-worker" class="text-button danger" title="Revoke selected worker">Revoke</button></div>
     <button id="new-session" class="primary wide">＋ New session</button><div class="section-label sessions-heading">SESSIONS · ALL FOLDERS <button id="refresh" class="icon" aria-label="Refresh sessions">↻</button></div><div id="sessions" class="sessions"></div><button id="more-sessions" class="text-button" hidden>Load more</button></div>
     <div class="sidebar-footer"><span id="connection" class="connection">Connecting…</span><button id="logout" class="text-button" title="Sign out">Sign out</button></div>
   </aside>

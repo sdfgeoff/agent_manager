@@ -6,11 +6,13 @@ Run Codex sessions on your Linux machines and control them from a phone or deskt
 
 ```sh
 cargo build --release --locked
-install -Dm755 target/release/server ~/.local/bin/server
+install -Dm755 target/release/server ~/bin/server
 install -Dm755 target/release/worker ~/.local/bin/worker
 ```
 
 Build requires Rust (edition 2024), a C compiler, and standard Linux development tools. SQLite is bundled. No Node build, external web assets, or separate frontend server is needed.
+
+Add `~/bin` to your PATH, or use `~/bin/server` explicitly. Server state belongs in a persistent directory such as `~/.local/state/agentmanager-server`.
 
 ## Try locally
 
@@ -32,6 +34,8 @@ Build requires Rust (edition 2024), a C compiler, and standard Linux development
 3. Choose the worker and **New session**. Browse to any folder accessible to that user, create folders, choose a model, reasoning effort, sandbox, and approval policy, and start chatting. Use the same URL in another browser to control the same sessions.
 
 4. After registration, start the worker with just `worker`. It stores its server address and private credential in `$XDG_STATE_HOME/agentmanager/worker.credential.json`, or `~/.local/state/agentmanager/worker.credential.json`. Use `--credential-file PATH` for a separate server or worker identity, `--name laptop` during registration, or `--codex /absolute/path/to/codex` if Codex is outside your PATH.
+
+5. The machine selector shows each worker's reported build version. The selected worker also shows its full version below the selector. Offline workers retain their last reported version; older workers without version reporting show **Version unknown** and continue working normally. Versions are informational and do not gate connections.
 
 ## Expose it publicly
 

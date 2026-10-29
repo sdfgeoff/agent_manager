@@ -393,6 +393,80 @@ async fn registration_cannot_be_replayed_and_browser_cookie_cannot_authenticate_
 }
 
 #[tokio::test]
+async fn worker_versions_are_reported_live_remembered_offline_and_optional_for_old_workers() {
+    let server = Server::new().await;
+    let cookie = server.login().await;
+    let (worker, credential) = server.worker().await;
+    let url = server.url.replacen("http:", "ws:", 1) + "/api/worker";
+    let mut request = url.clone().into_client_request().unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {credential}").parse().unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    socket.send(Message::Text(json!({"type":"event","message":{"method":"manager/connected","params":{"alive":true,"workerVersion":"0.2.2"}}}).to_string().into())).await.unwrap();
+    let fetch = || {
+        server
+            .client
+            .get(format!("{}/api/workers", server.url))
+            .header("Cookie", &cookie)
+    };
+    let online = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let rows = fetch().send().await.unwrap().json::<Value>().await.unwrap();
+            if rows[0]["workerVersion"] == "0.2.2" {
+                break rows;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(online[0]["id"], worker);
+    assert_eq!(online[0]["online"], true);
+    socket.close(None).await.unwrap();
+    let offline = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let rows = fetch().send().await.unwrap().json::<Value>().await.unwrap();
+            if rows[0]["online"] == false {
+                break rows;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(offline[0]["workerVersion"], "0.2.2");
+    assert_eq!(
+        Store::open(server._dir.path()).unwrap().workers().unwrap()[0]
+            .version
+            .as_deref(),
+        Some("0.2.2")
+    );
+    let mut request = url.into_client_request().unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {credential}").parse().unwrap(),
+    );
+    let (mut legacy, _) = connect_async(request).await.unwrap();
+    legacy
+        .send(Message::Text(
+            r#"{"type":"event","message":{"method":"manager/connected","params":{"alive":true}}}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let rows = fetch().send().await.unwrap().json::<Value>().await.unwrap();
+    assert_eq!(rows[0]["online"], true);
+    assert!(rows[0]["workerVersion"].is_null());
+    legacy.send(Message::Text(json!({"type":"event","message":{"method":"manager/connected","params":{"workerVersion":"<invalid>"}}}).to_string().into())).await.unwrap();
+    let rows = fetch().send().await.unwrap().json::<Value>().await.unwrap();
+    assert_eq!(rows[0]["online"], true);
+    assert!(rows[0]["workerVersion"].is_null());
+    legacy.close(None).await.unwrap();
+}
+
+#[tokio::test]
 async fn newer_server_accepts_original_worker_packets_without_a_version_handshake() {
     let server = Server::new().await;
     let cookie = server.login().await;

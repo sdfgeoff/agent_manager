@@ -1,7 +1,7 @@
 {
   "repository": "sdfgeoff/agent_manager",
-  "binary": "/home/geoffrey/server",
-  "data_dir": "/home/geoffrey/agent-manager-data",
+  "binary": "/home/geoffrey/bin/server",
+  "data_dir": "/home/geoffrey/.local/state/agentmanager-server",
   "service": "agentmanager-server.service",
   "health_url": "http://127.0.0.1:8080/healthz",
   "state_dir": "/home/geoffrey/.local/state/agentmanager-update"

@@ -57,6 +57,7 @@ struct Peer {
     generation: String,
     sender: mpsc::Sender<Wire>,
     stop: watch::Sender<bool>,
+    version: Option<String>,
 }
 struct Pending {
     worker: String,
@@ -389,7 +390,11 @@ async fn workers(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<J
     app.authorize(&headers)?;
     let records = app.store.workers()?;
     let peers = app.peers.lock().unwrap();
-    Ok(Json(json!(records.into_iter().map(|r|json!({"id":r.id,"name":r.name,"online":peers.contains_key(&r.id),"createdAt":r.created_at})).collect::<Vec<_>>())))
+    Ok(Json(json!(records.into_iter().map(|r|{
+        let peer=peers.get(&r.id);
+        let version=peer.map(|p|p.version.clone()).unwrap_or(r.version);
+        json!({"id":r.id,"name":r.name,"online":peer.is_some(),"createdAt":r.created_at,"workerVersion":version})
+    }).collect::<Vec<_>>())))
 }
 async fn enrollment(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     app.authorize(&headers)?;
@@ -600,6 +605,7 @@ async fn worker_socket(app: Arc<App>, id: String, socket: WebSocket) {
                 generation: generation.clone(),
                 sender: tx,
                 stop,
+                version: None,
             },
         ) {
             let _ = old.stop.send(true);
@@ -625,7 +631,20 @@ async fn worker_socket(app: Arc<App>, id: String, socket: WebSocket) {
                                         && let Some(p)=pending.remove(request_id) {let _=p.sender.send(message);
                                     }
                                 }
-                                Wire::Event {message}=>app.emit(json!({"type":"codex","worker":id,"message":message})),
+                                Wire::Event {message}=>{
+                                    if message["method"]=="manager/connected" {
+                                        let version=message["params"]["workerVersion"].as_str().filter(|v|!v.is_empty() && v.len()<=128 && v.bytes().all(|c|c.is_ascii_alphanumeric() || b".+-_".contains(&c)));
+                                        if let Some(version)=version {
+                                            let mut peers=app.peers.lock().unwrap();
+                                            if let Some(peer)=peers.get_mut(&id) && peer.generation==generation {
+                                                if let Err(error)=app.store.set_worker_version(&id,version) {tracing::warn!(%error,"Could not persist worker version");}
+                                                peer.version=Some(version.into());
+                                                app.emit(json!({"type":"workers_changed"}));
+                                            }
+                                        }
+                                    }
+                                    app.emit(json!({"type":"codex","worker":id,"message":message}));
+                                }
                                 _=>{}
                             }
                         }

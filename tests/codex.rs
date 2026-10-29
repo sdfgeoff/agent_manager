@@ -101,6 +101,12 @@ async fn approvals_survive_without_subscribers_and_can_only_be_answered_once() {
     let codex = Codex::spawn(binary.to_str().unwrap()).await.unwrap();
     let models = codex.call("model/list", json!({})).await.unwrap();
     assert_eq!(models["data"][0]["model"], "test-model");
+    assert_eq!(
+        worker::dispatch(codex.clone(), "manager/status", json!({}))
+            .await
+            .unwrap()["workerVersion"],
+        env!("CARGO_PKG_VERSION")
+    );
     codex
         .call(
             "turn/start",

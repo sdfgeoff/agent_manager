@@ -35,11 +35,15 @@ $('login-form').onsubmit = async event => {
   try { await api('/api/login', { username: $('username').value.trim(), password: $('password').value }); $('password').value = ''; await start(); } catch (e) { $('login-error').textContent = e.message; } finally { button.disabled = false; }
 };
 $('logout').onclick = safe(async () => { await api('/api/logout', {}); showLogin(); });
+function versionLabel(worker) {
+  const version = worker?.workerVersion;
+  return typeof version === 'string' && version ? (version.startsWith('v') ? version : `v${version}`) : 'Version unknown';
+}
 async function loadWorkers() {
   state.workers = await api('/api/workers'); $('worker-count').textContent = state.workers.length;
   const select = $('worker-select'); select.replaceChildren();
   if (!state.workers.length) select.append(new Option('No workers registered', ''));
-  for (const worker of state.workers) select.append(new Option(`${worker.online ? '●' : '○'} ${worker.name}${worker.online ? '' : ' · offline'}`, worker.id));
+  for (const worker of state.workers) select.append(new Option(`${worker.online ? '●' : '○'} ${worker.name} · ${versionLabel(worker)}${worker.online ? '' : ' · offline'}`, worker.id));
   if (!state.workers.some(w => w.id === state.worker)) {
     const worker = state.workers.find(w => w.online) || state.workers[0];
     await chooseWorker(worker?.id || null);
@@ -56,6 +60,9 @@ async function chooseWorker(id) {
 }
 function online() { return !!state.workers.find(w => w.id === state.worker)?.online; }
 function updateControls() {
+  const worker = state.workers.find(w => w.id === state.worker);
+  $('worker-version').hidden = !worker;
+  $('worker-version').textContent = worker ? `${worker.workerVersion ? worker.online ? 'Worker ' : 'Last reported: ' : ''}${versionLabel(worker)}` : '';
   $('new-session').disabled = !online(); $('welcome-new').disabled = !online(); $('refresh').disabled = !online(); $('revoke-worker').disabled = !state.worker;
   $('send').disabled = !online() || state.sessionBusy; $('stop').disabled = !online();
   const active = state.thread && state.active[state.thread.id]; $('stop').hidden = !active; $('send').textContent = active ? 'Steer ↑' : 'Send ↑';

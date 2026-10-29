@@ -127,7 +127,7 @@ async fn connection(credential: &Credential, codex: Arc<Codex>) -> Result<()> {
     let mut ping = tokio::time::interval(Duration::from_secs(20));
     let mut last_seen = std::time::Instant::now();
     let hello = Wire::Event {
-        message: json!({"method":"manager/connected","params":codex.status()}),
+        message: json!({"method":"manager/connected","params":status(&codex)}),
     };
     sink.send(Message::Text(serde_json::to_string(&hello)?.into()))
         .await?;
@@ -176,7 +176,7 @@ async fn connection(credential: &Credential, codex: Arc<Codex>) -> Result<()> {
 pub async fn dispatch(codex: Arc<Codex>, method: &str, params: Value) -> Result<Value> {
     match method {
         "manager/list" => codex.list_sessions(params).await,
-        "manager/status" => Ok(codex.status()),
+        "manager/status" => Ok(status(&codex)),
         "manager/respond" => codex.respond(params).await,
         "fs/list" => list_dir(params).await,
         "fs/mkdir" => {
@@ -187,6 +187,11 @@ pub async fn dispatch(codex: Arc<Codex>, method: &str, params: Value) -> Result<
         method if crate::codex::allowed(method) => codex.call(method, params).await,
         _ => bail!("Unsupported method: {method}"),
     }
+}
+fn status(codex: &Codex) -> Value {
+    let mut status = codex.status();
+    status["workerVersion"] = json!(env!("CARGO_PKG_VERSION"));
+    status
 }
 fn absolute_path(params: &Value) -> Result<PathBuf> {
     let path = params["path"].as_str().unwrap_or("~");

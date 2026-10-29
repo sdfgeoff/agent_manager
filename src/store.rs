@@ -11,6 +11,7 @@ pub struct WorkerRecord {
     pub id: String,
     pub name: String,
     pub created_at: i64,
+    pub version: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -32,9 +33,18 @@ impl Store {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS enrollment (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY, name TEXT NOT NULL, credential_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY, name TEXT NOT NULL, credential_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, version TEXT);
             CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, version TEXT NOT NULL, created_at INTEGER NOT NULL);")?;
-        let tx = db.transaction()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let has_version: bool = tx
+            .prepare("PRAGMA table_info(workers)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .iter()
+            .any(|column| column == "version");
+        if !has_version {
+            tx.execute("ALTER TABLE workers ADD COLUMN version TEXT", [])?;
+        }
         tx.execute("INSERT INTO users (username,password_hash,version,created_at) SELECT 'admin',value,?1,?2 FROM settings WHERE key='password' ON CONFLICT(username) DO NOTHING",params![security::token(),now()])?;
         tx.execute("DELETE FROM settings WHERE key='password'", [])?;
         tx.commit()?;
@@ -131,7 +141,7 @@ impl Store {
         let id = uuid::Uuid::new_v4().to_string();
         let credential = security::token();
         tx.execute(
-            "INSERT INTO workers VALUES (?1,?2,?3,?4)",
+            "INSERT INTO workers (id,name,credential_hash,created_at) VALUES (?1,?2,?3,?4)",
             params![id, name.trim(), security::digest(&credential), now()],
         )?;
         tx.commit()?;
@@ -152,16 +162,24 @@ impl Store {
     pub fn workers(&self) -> Result<Vec<WorkerRecord>> {
         let db = self.0.lock().unwrap();
         let mut stmt =
-            db.prepare("SELECT id,name,created_at FROM workers ORDER BY created_at,name")?;
+            db.prepare("SELECT id,name,created_at,version FROM workers ORDER BY created_at,name")?;
         Ok(stmt
             .query_map([], |r| {
                 Ok(WorkerRecord {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     created_at: r.get(2)?,
+                    version: r.get(3)?,
                 })
             })?
             .collect::<Result<_, _>>()?)
+    }
+    pub fn set_worker_version(&self, id: &str, version: &str) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "UPDATE workers SET version=?1 WHERE id=?2",
+            params![version, id],
+        )?;
+        Ok(())
     }
     pub fn revoke(&self, id: &str) -> Result<()> {
         self.0
@@ -182,6 +200,34 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn worker_version_migration_preserves_existing_credentials() {
+        let dir = crate::test_support::tempdir();
+        let credential = security::token();
+        let db = Connection::open(dir.path().join("agentmanager.sqlite3")).unwrap();
+        db.execute_batch("CREATE TABLE workers (id TEXT PRIMARY KEY,name TEXT NOT NULL,credential_hash TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL);").unwrap();
+        db.execute(
+            "INSERT INTO workers VALUES ('legacy','Original worker',?1,1)",
+            [security::digest(&credential)],
+        )
+        .unwrap();
+        drop(db);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            store.worker_for_token(&credential).unwrap().as_deref(),
+            Some("legacy")
+        );
+        assert!(store.workers().unwrap()[0].version.is_none());
+        store.set_worker_version("legacy", "0.2.2").unwrap();
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            store.workers().unwrap()[0].version.as_deref(),
+            Some("0.2.2")
+        );
+        let key = store.enrollment().unwrap();
+        assert!(store.enroll(&key, "Another worker").is_ok());
+    }
     #[test]
     fn legacy_password_migrates_once_without_losing_workers() {
         let dir = crate::test_support::tempdir();

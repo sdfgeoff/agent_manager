@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/server --listen 127.0.0.1:8080 --public-url https://agents.example.com --data-dir %h/.local/state/agentmanager-server
+ExecStart=%h/bin/server --listen 127.0.0.1:8080 --public-url https://agents.example.com --data-dir %h/.local/state/agentmanager-server
 Restart=on-failure
 RestartSec=5
 UMask=0077
