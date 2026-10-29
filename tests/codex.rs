@@ -10,7 +10,7 @@ async fn discovery_spans_cli_and_desktop_folders_and_keeps_empty_managed_session
     let binary = dir.path().join("codex-test");
     std::fs::write(&binary, include_str!("fixtures/codex.py")).unwrap();
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let saved = json!({"cli-old":{"id":"cli-old","name":"CLI project","source":"cli","cwd":"/projects/one","preview":"Earlier work","updatedAt":20,"turns":[{"id":"old-turn","items":[]}]},"desktop-old":{"id":"desktop-old","name":"Desktop project","source":"vscode","cwd":"/unrelated/project","preview":"Other work","updatedAt":10,"turns":[{"id":"desktop-turn","items":[]}]}});
+    let saved = json!({"cli-old":{"id":"cli-old","name":"CLI project","source":"cli","locked":true,"cwd":"/projects/one","preview":"Earlier work","updatedAt":20,"turns":[{"id":"old-turn","items":[]}]},"desktop-old":{"id":"desktop-old","name":"Desktop project","source":"vscode","cwd":"/unrelated/project","preview":"Other work","updatedAt":10,"turns":[{"id":"desktop-turn","items":[]}]}});
     std::fs::write(
         binary.with_extension("state.json"),
         serde_json::to_vec(&saved).unwrap(),
@@ -52,6 +52,34 @@ async fn discovery_spans_cli_and_desktop_folders_and_keeps_empty_managed_session
     .unwrap();
     assert_eq!(second["data"][0]["cwd"], "/unrelated/project");
     assert!(second["nextCursor"].is_null());
+    assert_eq!(
+        codex
+            .call("thread/read", json!({"threadId":"cli-old"}))
+            .await
+            .unwrap()["thread"]["name"],
+        "CLI project"
+    );
+    assert_eq!(
+        codex
+            .call(
+                "thread/turns/list",
+                json!({"threadId":"cli-old","itemsView":"full"})
+            )
+            .await
+            .unwrap()["data"][0]["id"],
+        "old-turn"
+    );
+    assert!(
+        codex
+            .call(
+                "thread/resume",
+                json!({"threadId":"cli-old","excludeTurns":true})
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("active writer")
+    );
     assert_eq!(
         codex
             .call(

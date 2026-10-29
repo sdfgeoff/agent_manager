@@ -14,7 +14,13 @@ async function api(path, body, method) {
   return data;
 }
 function rpc(method, params = {}, worker = state.worker) { if (!worker) return Promise.reject(new Error('Choose an online worker first.')); return api(`/api/workers/${encodeURIComponent(worker)}/rpc`, { method, params }); }
-function safe(task) { return (...args) => Promise.resolve().then(() => task(...args)).catch(e => notice(e.message)); }
+function errorText(error) { const message = error.message || String(error); return message.includes('active writer') ? 'This conversation is open in another Codex process. You can read its history here; close the other client before sending a message or changing settings.' : message; }
+function safe(task) { return (...args) => Promise.resolve().then(() => task(...args)).catch(e => notice(errorText(e))); }
+function rememberSettings(id, result) {
+  const previous = settings.get(id) || {}; const thread = result.thread || {};
+  const config = { ...previous, model: result.model || thread.model || previous.model || '', effort: result.reasoningEffort || thread.reasoningEffort || previous.effort || '', approvalPolicy: result.approvalPolicy || previous.approvalPolicy || 'on-request', sandbox: result.sandbox ? result.sandbox.type === 'dangerFullAccess' ? 'danger-full-access' : result.sandbox.type === 'readOnly' ? 'read-only' : 'workspace-write' : previous.sandbox || 'workspace-write' };
+  settings.set(id, config); return config;
+}
 function showLogin() {
   state.events?.close(); state.events = null; state.epoch++; state.worker = null; state.thread = null;
   state.items.clear(); state.requests = []; state.active = {}; settings.clear(); drafts.clear();
@@ -90,10 +96,9 @@ async function openThread(thread) {
   $('messages').replaceChildren(); $('welcome').hidden = true; $('conversation').hidden = false; $('composer').hidden = false; $('configure').disabled = false;
   $('session-title').textContent = thread.name || thread.preview || 'Untitled session'; $('session-path').textContent = thread.cwd || ''; $('sidebar').classList.remove('open'); renderThreads(); notice('');
   try {
-    const result = await rpc('thread/resume', { threadId: thread.id, excludeTurns: true }, worker);
+    const result = await rpc('thread/read', { threadId: thread.id }, worker);
     if (epoch !== state.epoch) return;
-    state.thread = { ...thread, ...result.thread }; const s = settings.get(thread.id) || {};
-    settings.set(thread.id, { ...s, model: result.model || s.model || '', effort: result.reasoningEffort || s.effort || '', approvalPolicy: result.approvalPolicy || s.approvalPolicy || 'on-request', sandbox: result.sandbox?.type === 'dangerFullAccess' ? 'danger-full-access' : result.sandbox?.type === 'readOnly' ? 'read-only' : 'workspace-write' });
+    state.thread = { ...thread, ...result.thread }; rememberSettings(thread.id, result);
     const history = await rpc('thread/turns/list', { threadId: thread.id, itemsView: 'full', sortDirection: 'desc', limit: 20 }, worker);
     if (epoch !== state.epoch) return;
     state.older = history.nextCursor; $('older').hidden = !state.older;
@@ -203,12 +208,14 @@ function renderRequests() {
 }
 $('composer').onsubmit = safe(async event => {
   event.preventDefault(); const text = $('prompt').value.trim(); if (!text || !state.thread || state.sessionBusy) return;
-  const worker = state.worker; const threadId = state.thread.id; const active = state.active[threadId]; const config = settings.get(threadId) || {};
+  const worker = state.worker; const threadId = state.thread.id; const active = state.active[threadId];
   state.sessionBusy = true; updateControls(); notice('');
   try {
     const input = [{ type: 'text', text }];
     if (active) await rpc('turn/steer', { threadId, expectedTurnId: active, input }, worker);
     else {
+      const resumed = await rpc('thread/resume', { threadId, excludeTurns: true }, worker);
+      const config = rememberSettings(threadId, resumed);
       const params = { threadId, input }; if (config.model) params.model = config.model; if (config.effort) params.effort = config.effort;
       const result = await rpc('turn/start', params, worker); if (state.thread?.id === threadId) state.active[threadId] = result.turn.id;
     }
@@ -223,10 +230,13 @@ async function newSession() {
   $('new-name').value = ''; $('new-path').value = '~'; $('new-model').value = ''; $('new-effort').value = ''; $('new-approval').value = 'on-request'; $('new-sandbox').value = 'workspace-write'; $('new-instructions').value = ''; $('new-instructions').disabled = false; $('new-path').disabled = false; $('browse').disabled = false; $('session-error').textContent = ''; $('session-dialog').showModal();
 }
 $('new-session').onclick = newSession; $('welcome-new').onclick = newSession;
-$('configure').onclick = () => {
-  if (!state.thread) return; state.edit = true; const config = settings.get(state.thread.id) || {};
+$('configure').onclick = safe(async () => {
+  if (!state.thread) return; const epoch = state.epoch; const id = state.thread.id;
+  const resumed = await rpc('thread/resume', { threadId: id, excludeTurns: true });
+  if (epoch !== state.epoch) return;
+  state.edit = true; const config = rememberSettings(id, resumed);
   $('dialog-title').textContent = 'Session settings'; $('create').textContent = 'Save settings'; $('new-name').value = state.thread.name || ''; $('new-path').value = state.thread.cwd || ''; $('new-path').disabled = true; $('browse').disabled = true; $('new-model').value = config.model || ''; $('new-effort').value = config.effort || ''; $('new-approval').value = config.approvalPolicy || 'on-request'; $('new-sandbox').value = config.sandbox || 'workspace-write'; $('new-instructions').value = ''; $('new-instructions').disabled = true; $('session-error').textContent = ''; $('session-dialog').showModal();
-};
+});
 $('session-form').onsubmit = async event => {
   event.preventDefault(); const button = $('create'); button.disabled = true; $('session-error').textContent = '';
   const worker = state.worker;

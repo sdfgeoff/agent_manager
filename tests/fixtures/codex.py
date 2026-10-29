@@ -61,9 +61,14 @@ for line in sys.stdin:
         result = config(thread)
     elif method == 'thread/resume':
         thread = threads[params['threadId']]
+        if thread.get('locked'):
+            send({'id': request_id, 'error': {'code': -32603, 'message': 'thread-store conflict: thread already has an active writer'}})
+            continue
         thread.update({k: v for k, v in params.items() if k not in ('threadId', 'excludeTurns')})
         save()
         result = config(thread)
+    elif method == 'thread/read':
+        result = {'thread': metadata(threads[params['threadId']])}
     elif method == 'thread/name/set':
         threads[params['threadId']]['name'] = params['name']
         save()
