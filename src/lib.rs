@@ -15,6 +15,8 @@ use serde_json::Value;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// This envelope is deliberately unversioned. Preserve existing field meanings;
+// additions must be optional/defaulted so older workers can stay connected.
 pub enum Wire {
     Request {
         id: String,

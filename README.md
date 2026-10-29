@@ -92,6 +92,16 @@ Build requires Rust (edition 2024), a C compiler, and standard Linux development
 
 5. Back up the server state directory and each worker's Codex home if needed. The default server directory is `.data/server` relative to the working directory; use an explicit `--data-dir` for a service. There is no MFA, file upload, or full terminal. It has not had an independent security audit.
 
+## Server and worker compatibility
+
+1. The server is expected to upgrade before workers. Keep the request/response/event protocol unversioned and compatible with older workers wherever possible. Existing method names, field names, value types, and meanings remain supported.
+
+2. Extend existing payloads with optional fields and sensible defaults. Readers ignore unknown fields. New features should use optional capability information or handle unsupported-method responses, retaining the old behaviour when a worker cannot provide a feature. An older worker should keep its existing functionality rather than be rejected for its release number.
+
+3. Keep regression tests using frozen older-worker packets, independent of the current Rust message definitions. A change that needs new worker functionality must not make unrelated existing functionality stop working. Server and worker binary release numbers identify builds; they are not mandatory protocol versions.
+
+4. This compatibility policy is separate from the worker's local Codex app-server interface. Codex upgrades still need their own compatibility checks. Worker rollout should wait for idle sessions and proceed one machine at a time.
+
 ## GitHub releases and deployment
 
 1. GitHub-hosted CI checks formatting, Clippy, and tests on pushes and pull requests. Pushing a stable version tag such as `v0.2.0` builds standalone x86_64 Linux binaries for the server, worker, and Rust updater. The tag must match the version in `Cargo.toml`. A release is published only after all assets and `SHA256SUMS` have been uploaded. Production machines do not run CI jobs or need GitHub/SSH credentials.

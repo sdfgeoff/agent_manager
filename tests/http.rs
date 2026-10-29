@@ -393,6 +393,59 @@ async fn registration_cannot_be_replayed_and_browser_cookie_cannot_authenticate_
 }
 
 #[tokio::test]
+async fn newer_server_accepts_original_worker_packets_without_a_version_handshake() {
+    let server = Server::new().await;
+    let cookie = server.login().await;
+    let (worker, credential) = server.worker().await;
+    let mut request = (server.url.replacen("http:", "ws:", 1) + "/api/worker")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {credential}").parse().unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    // Frozen packet shapes, intentionally independent of the current Wire enum.
+    // Legacy workers do not send a protocol version or capabilities handshake.
+    socket.send(Message::Text(r#"{"type":"event","message":{"method":"manager/connected","params":{"alive":true,"active":{},"requests":[]}}}"#.into())).await.unwrap();
+    for (method, legacy_result) in [
+        (
+            "manager/status",
+            json!({"alive":true,"active":{},"requests":[]}),
+        ),
+        ("manager/list", json!({"data":[],"nextCursor":null})),
+    ] {
+        let request = server
+            .client
+            .post(format!("{}/api/workers/{worker}/rpc", server.url))
+            .header("Cookie", &cookie)
+            .header("Origin", &server.url)
+            .header("X-Agentmanager", "1")
+            .json(&json!({"method":method,"params":{}}));
+        let http = tokio::spawn(async move { request.send().await.unwrap() });
+        let message = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let packet: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+        assert_eq!(packet["type"], "request");
+        assert_eq!(packet["method"], method);
+        assert_eq!(packet["params"], json!({}));
+        // Omitted optional error and additional envelope fields are both accepted.
+        let reply = json!({"type":"response","id":packet["id"],"result":legacy_result,"extra_metadata":"ignored"});
+        socket
+            .send(Message::Text(reply.to_string().into()))
+            .await
+            .unwrap();
+        let response = http.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.json::<Value>().await.unwrap(), legacy_result);
+    }
+    socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
 async fn rpc_routes_to_worker_and_revocation_disconnects_it() {
     let server = Server::new().await;
     let cookie = server.login().await;
