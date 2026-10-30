@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import uuid
+import subprocess
 
 state_path = Path(sys.argv[0]).with_suffix('.state.json')
 threads = json.loads(state_path.read_text()) if state_path.exists() else {}
@@ -41,6 +42,27 @@ for line in sys.stdin:
     request_id = message.get('id')
     params = message.get('params', {})
     result = {}
+    # Opt-in integration mode: exercise the real MCP handshake at the same
+    # point that native Codex requires it, before registration can return.
+    server = params.get('config', {}).get('mcp_servers', {}).get('agentmanager_board')
+    if method in ('thread/start', 'thread/resume') and server and Path(sys.argv[0]).with_suffix('.mcp-check').exists():
+        requests = [
+            {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {}},
+            {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}},
+        ]
+        process = subprocess.run([server['command'], *server.get('args', [])],
+                                 input=''.join(json.dumps(r) + '\n' for r in requests),
+                                 text=True, capture_output=True, timeout=8)
+        replies = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+        errors = [r['error'] for r in replies if 'error' in r]
+        failure = Path(sys.argv[0]).with_suffix('.fail-resume-once')
+        if errors or len(replies) != 2:
+            send({'id': request_id, 'error': {'code': -32603, 'message': 'Required MCP handshake failed: ' + json.dumps(errors)}})
+            continue
+        if method == 'thread/resume' and failure.exists():
+            failure.unlink()
+            send({'id': request_id, 'error': {'code': -32603, 'message': 'Injected failure after successful MCP discovery'}})
+            continue
     if method == 'initialize':
         result = {'userAgent': 'test'}
     elif method == 'initialized':

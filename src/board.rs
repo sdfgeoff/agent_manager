@@ -33,6 +33,7 @@ pub fn migrate(db: &Connection) -> Result<()> {
 CREATE TABLE IF NOT EXISTS board_actors(id TEXT PRIMARY KEY,handle TEXT NOT NULL UNIQUE,name TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('human','agent')));
 CREATE TABLE IF NOT EXISTS board_agents(id TEXT PRIMARY KEY REFERENCES board_actors(id),worker TEXT NOT NULL,thread TEXT NOT NULL,persona TEXT NOT NULL,settings TEXT NOT NULL,paused INTEGER NOT NULL DEFAULT 0,token_hash TEXT NOT NULL UNIQUE,error TEXT,UNIQUE(worker,thread));
 CREATE TABLE IF NOT EXISTS board_channels(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,description TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS board_agent_registrations(id TEXT PRIMARY KEY,worker TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,source_thread TEXT,token_hash TEXT,expires INTEGER NOT NULL,UNIQUE(worker,source_thread));
 CREATE TABLE IF NOT EXISTS board_topics(id INTEGER PRIMARY KEY AUTOINCREMENT,channel INTEGER NOT NULL REFERENCES board_channels(id),title TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'discussion' CHECK(status IN ('discussion','working','done','archived')),assignee TEXT REFERENCES board_actors(id),author TEXT NOT NULL REFERENCES board_actors(id),created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS board_replies(id INTEGER PRIMARY KEY AUTOINCREMENT,topic INTEGER NOT NULL REFERENCES board_topics(id),author TEXT NOT NULL REFERENCES board_actors(id),body TEXT NOT NULL,created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS board_subscriptions(actor TEXT NOT NULL REFERENCES board_actors(id),kind TEXT NOT NULL CHECK(kind IN ('channel','topic')),target INTEGER NOT NULL,subscribed INTEGER NOT NULL,PRIMARY KEY(actor,kind,target));
@@ -188,6 +189,53 @@ impl Store {
     pub fn board_agent_auth(&self, token: &str) -> Result<Option<Actor>> {
         Ok(self.0.lock().unwrap().query_row("SELECT a.id,a.handle,a.name,a.kind FROM board_actors a JOIN board_agents g ON a.id=g.id WHERE g.token_hash=?1",[security::digest(token)],actor_row).optional()?)
     }
+    /// Reserve the identity before the worker starts MCP. Failed conversions
+    /// retain their identity so a new UI request can resume the same binding.
+    pub fn board_begin_registration(
+        &self,
+        requested: &str,
+        worker: &str,
+        thread: Option<&str>,
+        token: &str,
+    ) -> Result<String> {
+        let mut db = self.0.lock().unwrap();
+        let tx = db.transaction()?;
+        if let Some((old_worker, old_thread)) = tx
+            .query_row(
+                "SELECT worker,source_thread FROM board_agent_registrations WHERE id=?1",
+                [requested],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+        {
+            ensure!(
+                old_worker == worker && old_thread.as_deref() == thread,
+                "Registration request id reused for another session"
+            );
+        }
+        let saved = if let Some(thread) = thread {
+            tx.query_row(
+                "SELECT id FROM board_agent_registrations WHERE worker=?1 AND source_thread=?2",
+                params![worker, thread],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        } else {
+            None
+        };
+        let id = saved.unwrap_or_else(|| requested.to_owned());
+        tx.execute("INSERT INTO board_agent_registrations(id,worker,source_thread,token_hash,expires) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,expires=excluded.expires",params![id,worker,thread,security::digest(token),now()+600])?;
+        tx.commit()?;
+        Ok(id)
+    }
+    pub fn board_end_registration(&self, id: &str, token_hash: &str) -> Result<()> {
+        self.0.lock().unwrap().execute("UPDATE board_agent_registrations SET token_hash=NULL,expires=0 WHERE id=?1 AND token_hash=?2",params![id,token_hash])?;
+        Ok(())
+    }
+    /// Bootstrap credentials grant catalogue discovery only, never board access.
+    pub fn board_registration_discovery(&self, token: &str) -> Result<bool> {
+        Ok(self.0.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM board_agent_registrations WHERE token_hash=?1 AND expires>?2)",params![security::digest(token),now()],|r|r.get(0))?)
+    }
     pub fn board_agents(&self) -> Result<Vec<Agent>> {
         Ok(self
             .0
@@ -216,6 +264,7 @@ impl Store {
             params![a.id, h, a.name],
         )?;
         tx.execute("INSERT INTO board_agents(id,worker,thread,persona,settings,paused,token_hash) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![a.id,a.worker,a.thread,a.persona,a.settings.to_string(),a.paused,security::digest(token)])?;
+        tx.execute("DELETE FROM board_agent_registrations WHERE id=?1", [&a.id])?;
         tx.commit()?;
         Ok(())
     }
@@ -958,6 +1007,81 @@ mod tests {
             s.board(&a, "list_topics", &json!({"search":"Reply 104"}))
                 .unwrap()["data"][0]["id"],
             1
+        );
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    #[test]
+    fn bootstrap_is_discovery_only_scoped_and_promoted_atomically() {
+        let dir = crate::test_support::tempdir();
+        let s = Store::open(dir.path()).unwrap();
+        let key = s.enrollment().unwrap();
+        let (worker, _) = s.enroll(&key, "test").unwrap();
+        let first = security::token();
+        let id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            s.board_begin_registration(&id, &worker, Some("thread"), &first)
+                .unwrap(),
+            id
+        );
+        assert!(s.board_registration_discovery(&first).unwrap());
+        assert!(s.board_agent_auth(&first).unwrap().is_none());
+        s.board_end_registration(&id, &security::digest(&first))
+            .unwrap();
+        assert!(!s.board_registration_discovery(&first).unwrap());
+        let second = security::token();
+        assert_eq!(
+            s.board_begin_registration(
+                &uuid::Uuid::new_v4().to_string(),
+                &worker,
+                Some("thread"),
+                &second
+            )
+            .unwrap(),
+            id
+        );
+        // A late cleanup must not revoke a newer attempt's credential.
+        s.board_end_registration(&id, &security::digest(&first))
+            .unwrap();
+        assert!(s.board_registration_discovery(&second).unwrap());
+        let a = Agent {
+            id: id.clone(),
+            handle: "new-agent".into(),
+            name: "New agent".into(),
+            worker: worker.clone(),
+            thread: "thread".into(),
+            persona: "Keep this".into(),
+            settings: json!({}),
+            paused: false,
+            error: None,
+        };
+        s.board_add_agent(&a, &second).unwrap();
+        assert!(s.board_agent_auth(&second).unwrap().is_some());
+        assert!(!s.board_registration_discovery(&second).unwrap());
+        let third = security::token();
+        let other = uuid::Uuid::new_v4().to_string();
+        s.board_begin_registration(&other, &worker, Some("another"), &third)
+            .unwrap();
+        s.0.lock()
+            .unwrap()
+            .execute(
+                "UPDATE board_agent_registrations SET expires=0 WHERE id=?1",
+                [&other],
+            )
+            .unwrap();
+        assert!(!s.board_registration_discovery(&third).unwrap());
+        s.revoke(&worker).unwrap();
+        assert_eq!(
+            s.0.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM board_agent_registrations", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
         );
     }
 }

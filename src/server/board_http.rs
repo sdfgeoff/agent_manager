@@ -75,12 +75,46 @@ fn capable(app: &App, worker: &str) -> ApiResult<()> {
     }
     Ok(())
 }
+// Scoped cleanup also revokes bootstrap authorization on cancellation/timeouts.
+struct RegistrationCredential {
+    app: Arc<App>,
+    id: String,
+    token_hash: String,
+}
+impl Drop for RegistrationCredential {
+    fn drop(&mut self) {
+        if let Err(error) = self
+            .app
+            .store
+            .board_end_registration(&self.id, &self.token_hash)
+        {
+            tracing::error!(%error,"Cannot revoke registration discovery credential");
+        }
+    }
+}
 async fn openapi(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Response> {
-    let who = actor(&app, &headers, false)?;
-    let document = crate::board_api::document(
-        who.kind == "human",
-        if app.secure { "__Host-am" } else { "am" },
-    );
+    let bootstrap = if let Some(value) = headers.get(header::AUTHORIZATION) {
+        if headers.contains_key(header::ORIGIN) {
+            return Err(rejected(
+                StatusCode::FORBIDDEN,
+                "Agent credentials cannot be used by browser requests",
+            ));
+        }
+        let token = value
+            .to_str()
+            .ok()
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .unwrap_or("");
+        app.store.board_registration_discovery(token)?
+    } else {
+        false
+    };
+    let human = if bootstrap {
+        false
+    } else {
+        actor(&app, &headers, false)?.kind == "human"
+    };
+    let document = crate::board_api::document(human, if app.secure { "__Host-am" } else { "am" });
     let etag = format!("\"{}\"", security::digest(&document.to_string()));
     if headers
         .get(header::IF_NONE_MATCH)
@@ -150,6 +184,17 @@ async fn operation(
                 }
                 return Ok(Json(json!(existing)));
             }
+            // A resumed failed conversion can retain its original worker-side
+            // identity even when the reopened dialog has a new request id.
+            if let (Some(thread), Some(worker), Some(handle)) = (
+                p["thread"].as_str(),
+                p["worker"].as_str(),
+                p["handle"].as_str(),
+            ) && let Some(existing) = app.store.board_agents()?.into_iter().find(|a| {
+                a.worker == worker && a.thread == thread && a.handle == handle.trim().to_lowercase()
+            }) {
+                return Ok(Json(json!(existing)));
+            }
             let handle = p["handle"].as_str().unwrap_or("").trim().to_lowercase();
             if !(2..=40).contains(&handle.len())
                 || !handle
@@ -208,11 +253,25 @@ async fn operation(
                 .filter(|s| uuid::Uuid::parse_str(s).is_ok())
                 .map(str::to_owned)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let _guard = lock(&app, &id).lock_owned().await;
             if let Ok(a) = app.store.board_agent(&id) {
                 return Ok(Json(json!(a)));
             }
             let token = security::token();
+            let id = app
+                .store
+                .board_begin_registration(
+                    &id,
+                    &worker,
+                    p["thread"].as_str().filter(|s| !s.is_empty()),
+                    &token,
+                )
+                .map_err(domain)?;
+            let _credential = RegistrationCredential {
+                app: app.clone(),
+                id: id.clone(),
+                token_hash: security::digest(&token),
+            };
+            let _guard = lock(&app, &id).lock_owned().await;
             let mut config = p.clone();
             config["id"] = json!(id);
             config["token"] = json!(token);

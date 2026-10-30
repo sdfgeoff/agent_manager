@@ -93,8 +93,12 @@ impl Fixture {
         value
     }
     async fn start_worker(&mut self) {
+        self.start_worker_code(include_str!("fixtures/codex.py"))
+            .await;
+    }
+    async fn start_worker_code(&mut self, code: &str) {
         let binary = self.dir.path().join("codex-test");
-        std::fs::write(&binary, include_str!("fixtures/codex.py")).unwrap();
+        std::fs::write(&binary, code).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         let credential = self.dir.path().join("worker.json");
         let key = if credential.exists() {
@@ -488,4 +492,202 @@ async fn scheduled_reminders_use_private_mcp_api_timer_and_paused_agent_delivery
     let input = starts[0]["params"]["input"][0]["text"].as_str().unwrap();
     assert!(input.contains("Private timed follow-up") && !input.contains("Private persona"));
     assert_eq!(f.op("list_topics", json!({})).await["data"], json!([]));
+}
+
+#[tokio::test]
+async fn registration_can_discover_tools_before_commit_and_retries_the_same_session() {
+    let mut f = Fixture::new().await;
+    f.start_worker().await;
+    std::fs::write(f.dir.path().join("codex-test.mcp-check"), "").unwrap();
+    // Creating a new agent also starts required MCP before a server-side agent exists.
+    let new=f.op("create_agent",json!({"handle":"new-agent","name":"New agent","worker":f.worker_id,"cwd":f.dir.path(),"persona":"Keep the persona"})).await;
+    assert!(new["thread"].is_string());
+    let rpc = |method: &str, params: Value| {
+        f.client
+            .post(format!("{}/api/workers/{}/rpc", f.url, f.worker_id))
+            .header("Cookie", &f.cookie)
+            .header("Origin", &f.url)
+            .header("X-Agentmanager", "1")
+            .json(&json!({"method":method,"params":params}))
+    };
+    let started = rpc(
+        "thread/start",
+        json!({"cwd":f.dir.path(),"developerInstructions":"Existing custom persona"}),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json::<Value>()
+    .await
+    .unwrap();
+    let thread = started["thread"]["id"].as_str().unwrap();
+    std::fs::write(f.dir.path().join("codex-test.fail-resume-once"), "").unwrap();
+    let original = uuid::Uuid::new_v4().to_string();
+    let args = json!({"requestId":original,"handle":"converted","name":"Converted","worker":f.worker_id,"thread":thread});
+    let response = f
+        .client
+        .post(format!("{}/api/board/create_agent", f.url))
+        .header("Cookie", &f.cookie)
+        .header("Origin", &f.url)
+        .header("X-Agentmanager", "1")
+        .json(&args)
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+    assert!(
+        response.json::<Value>().await.unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .contains("Injected failure")
+    );
+    assert!(f.app.store.board_agent(&original).is_err());
+    let credential = f
+        .dir
+        .path()
+        .join("worker.sessions.agents.agent-credentials")
+        .join(format!("{original}.json"));
+    let first: Value = serde_json::from_slice(&std::fs::read(&credential).unwrap()).unwrap();
+    assert_eq!(
+        f.client
+            .get(format!("{}/api/board/openapi.json", f.url))
+            .bearer_auth(first["token"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    // A reopened UI dialog has a different request id; registration must reuse
+    // the saved binding instead of allocating another session or failing 'bound'.
+    let mut retry = args.clone();
+    retry["requestId"] = json!(uuid::Uuid::new_v4().to_string());
+    let registered = f.op("create_agent", retry.clone()).await;
+    assert_eq!(
+        f.op("create_agent", retry).await,
+        registered,
+        "Lost-response retry must stay idempotent after finalizing the retained identity"
+    );
+    assert_eq!(registered["id"], original);
+    assert_eq!(registered["thread"], thread);
+    assert_eq!(registered["persona"], "Existing custom persona");
+    let current: Value = serde_json::from_slice(&std::fs::read(&credential).unwrap()).unwrap();
+    assert_ne!(first["token"], current["token"]);
+    assert!(
+        f.app
+            .store
+            .board_agent_auth(first["token"].as_str().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        f.app
+            .store
+            .board_agent_auth(current["token"].as_str().unwrap())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        !f.app
+            .store
+            .board_registration_discovery(current["token"].as_str().unwrap())
+            .unwrap()
+    );
+    assert_eq!(
+        f.calls()
+            .iter()
+            .filter(|c| c["method"] == "thread/start")
+            .count(),
+        2,
+        "Retry must not allocate a replacement"
+    );
+    assert!(
+        f.calls().iter().all(|c| c["method"] != "turn/start"),
+        "Registration must not request inference"
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_discovery_does_not_grant_board_access_or_bypass_revocation() {
+    let f = Fixture::new().await;
+    let key = f.app.store.enrollment().unwrap();
+    let (worker, _) = f.app.store.enroll(&key, "bootstrap").unwrap();
+    let token = security::token();
+    let id = uuid::Uuid::new_v4().to_string();
+    f.app
+        .store
+        .board_begin_registration(&id, &worker, Some("thread"), &token)
+        .unwrap();
+    let url = format!("{}/api/board/openapi.json", f.url);
+    let r = f.client.get(&url).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let etag = r.headers()["etag"].to_str().unwrap().to_owned();
+    let doc = r.json::<Value>().await.unwrap();
+    assert!(doc["paths"].get("/api/board/create_agent").is_none());
+    assert_eq!(
+        f.client
+            .post(format!("{}/api/board/create_topic", f.url))
+            .bearer_auth(&token)
+            .json(&json!({"channel":1,"body":"Must not publish"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        f.client
+            .get(&url)
+            .bearer_auth(&token)
+            .header("Origin", &f.url)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    f.app
+        .store
+        .board_end_registration(&id, &security::digest(&token))
+        .unwrap();
+    assert_eq!(
+        f.client
+            .get(&url)
+            .bearer_auth(&token)
+            .header("If-None-Match", etag)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+#[tokio::test]
+#[ignore = "requires installed Codex; isolated home and real MCP registration, no inference"]
+async fn installed_codex_registration_discovers_before_server_commits_agent() {
+    let mut f = Fixture::new().await;
+    f.start_worker_code("#!/usr/bin/env python3\nimport os,sys\nos.environ['CODEX_HOME']=sys.argv[0]+'.home'\nos.makedirs(os.environ['CODEX_HOME'],exist_ok=True)\nos.execvp('codex',['codex',*sys.argv[1:]])\n").await;
+    let agent=f.op("create_agent",json!({"requestId":uuid::Uuid::new_v4().to_string(),"handle":"native-bootstrap","name":"Native bootstrap","worker":f.worker_id,"cwd":f.dir.path(),"persona":"Remember this exact persona","settings":{"sandbox":"read-only"}})).await;
+    assert_eq!(agent["persona"], "Remember this exact persona");
+    let id = agent["id"].as_str().unwrap();
+    let credential = f
+        .dir
+        .path()
+        .join("worker.sessions.agents.agent-credentials")
+        .join(format!("{id}.json"));
+    let saved: Value = serde_json::from_slice(&std::fs::read(credential).unwrap()).unwrap();
+    assert!(
+        f.app
+            .store
+            .board_agent_auth(saved["token"].as_str().unwrap())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        !f.app
+            .store
+            .board_registration_discovery(saved["token"].as_str().unwrap())
+            .unwrap()
+    );
+    f.op("update_agent", json!({"id":id,"paused":true})).await;
 }
