@@ -691,3 +691,119 @@ async fn installed_codex_registration_discovers_before_server_commits_agent() {
     );
     f.op("update_agent", json!({"id":id,"paused":true})).await;
 }
+
+#[tokio::test]
+async fn avatars_are_shared_authenticated_persistent_and_permission_scoped() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let f = Fixture::new().await;
+    let image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=";
+    f.app
+        .store
+        .board_add_agent(
+            &Agent {
+                id: "avatar-agent".into(),
+                handle: "avatar-agent".into(),
+                name: "Avatar agent".into(),
+                worker: "unused".into(),
+                thread: "avatar-thread".into(),
+                persona: String::new(),
+                settings: json!({}),
+                paused: true,
+                error: None,
+            },
+            "avatar-agent-token",
+        )
+        .unwrap();
+    f.op("set_avatar", json!({"actor":"avatar-agent", "data":image}))
+        .await;
+    f.op("set_avatar", json!({"data":image})).await;
+    let overview = f.op("overview", json!({})).await;
+    let url = overview["people"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "human:admin")
+        .unwrap()["avatarUrl"]
+        .as_str()
+        .unwrap();
+    let url = format!("{}{url}", f.url);
+    assert_eq!(
+        f.client.get(&url).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = f
+        .client
+        .get(&url)
+        .header("Cookie", &f.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        STANDARD.decode(image).unwrap()
+    );
+    let reopened = Store::open(&f.dir.path().join("server")).unwrap();
+    assert_eq!(
+        reopened.board_avatar("human:admin").unwrap().unwrap(),
+        STANDARD.decode(image).unwrap()
+    );
+    for payload in [
+        json!({"data":"bm90IGFuIGltYWdl"}),
+        json!({"data":STANDARD.encode(vec![0;256*1024+1])}),
+    ] {
+        let response = f
+            .client
+            .post(format!("{}/api/board/set_avatar", f.url))
+            .header("Cookie", &f.cookie)
+            .header("Origin", &f.url)
+            .header("X-Agentmanager", "1")
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let csrf = f
+        .client
+        .post(format!("{}/api/board/set_avatar", f.url))
+        .header("Cookie", &f.cookie)
+        .json(&json!({"data":null}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(csrf.status(), StatusCode::FORBIDDEN);
+    let denied = f
+        .client
+        .post(format!("{}/api/board/set_avatar", f.url))
+        .bearer_auth("avatar-agent-token")
+        .json(&json!({"actor":"human:admin", "data":null}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+    assert!(f.app.store.board_avatar("human:admin").unwrap().is_some());
+    let own = f
+        .client
+        .post(format!("{}/api/board/set_avatar", f.url))
+        .bearer_auth("avatar-agent-token")
+        .json(&json!({"data":null}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(own.status(), StatusCode::OK);
+    assert!(f.app.store.board_avatar("avatar-agent").unwrap().is_none());
+    f.op("set_avatar", json!({"data":null})).await;
+    assert_eq!(
+        f.client
+            .get(&url)
+            .header("Cookie", &f.cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}

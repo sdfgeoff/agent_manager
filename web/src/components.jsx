@@ -1,8 +1,8 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { X, Paperclip, Send, Check, AtSign } from "lucide-react";
-import { board, friendly } from "./api";
+import { X, Paperclip, Send, Check } from "lucide-react";
+import { board, friendly, authGuard } from "./api";
 import { useApp, useDraft } from "./context";
 export function ErrorMessage({ error }) {
   return error ? (
@@ -55,6 +55,120 @@ export function Modal({ title, children, onClose, wide = false }) {
     </dialog>
   );
 }
+export function Avatar({ person, small = false }) {
+  const [failed, setFailed] = useState(null);
+  const name = person?.name || person?.handle || "?";
+  const initials = name
+    .trim()
+    .split(/[\s_-]+/)
+    .map((part) => Array.from(part)[0] || "")
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+  return (
+    <span
+      className={`avatar ${small ? "avatar-small" : ""}`}
+      aria-hidden="true"
+    >
+      {person?.avatarUrl && failed !== person.avatarUrl ? (
+        <img
+          src={person.avatarUrl}
+          alt=""
+          onError={() => setFailed(person.avatarUrl)}
+        />
+      ) : (
+        initials
+      )}
+    </span>
+  );
+}
+export function AvatarEditor({ person }) {
+  const app = useApp();
+  const input = useRef(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [notice, setNotice] = useState("");
+  async function save(file) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setNotice("");
+    let bitmap;
+    const guard = authGuard();
+    try {
+      let data = null;
+      if (file) {
+        if (!file.type.startsWith("image/") || file.size > 10 * 1024 * 1024)
+          throw new Error("Choose an image up to 10 MB.");
+        bitmap = await createImageBitmap(file);
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = 256;
+        const size = Math.min(bitmap.width, bitmap.height);
+        canvas
+          .getContext("2d")
+          .drawImage(
+            bitmap,
+            (bitmap.width - size) / 2,
+            (bitmap.height - size) / 2,
+            size,
+            size,
+            0,
+            0,
+            256,
+            256,
+          );
+        data = canvas.toDataURL("image/png").split(",")[1];
+      }
+      guard();
+      await board("set_avatar", { actor: person.id, data });
+      await app.refresh();
+      setNotice(file ? "Avatar updated." : "Avatar removed.");
+    } catch (e) {
+      setError(e);
+    } finally {
+      bitmap?.close();
+      setBusy(false);
+      if (input.current) input.current.value = "";
+    }
+  }
+  return (
+    <div className="avatar-editor">
+      <Avatar person={person} />
+      <div className="actions">
+        <input
+          ref={input}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          hidden
+          onChange={(e) => {
+            if (e.target.files[0]) save(e.target.files[0]);
+          }}
+        />
+        <BusyButton
+          type="button"
+          busy={busy}
+          onClick={() => input.current.click()}
+        >
+          Change avatar
+        </BusyButton>
+        {person.avatarUrl && (
+          <button type="button" disabled={busy} onClick={() => save(null)}>
+            Remove avatar
+          </button>
+        )}
+      </div>
+      <small className="muted">
+        Images are cropped to a square. Visible to everyone in this workspace.
+      </small>
+      <ErrorMessage error={error} />
+      {notice && (
+        <p className="success" role="status">
+          {notice}
+        </p>
+      )}
+    </div>
+  );
+}
 export function Person({ id, mention = false }) {
   const { people, openPerson } = useApp();
   const p = people.find((p) => p.id === id);
@@ -64,6 +178,7 @@ export function Person({ id, mention = false }) {
       className="person-link"
       onClick={() => openPerson(p.id)}
     >
+      {!mention && <Avatar person={p} small />}
       {mention ? "@" + p.handle : p.name}
     </button>
   ) : (
@@ -286,7 +401,7 @@ export function MentionInput({
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => insert(p)}
             >
-              <AtSign size={15} />
+              <Avatar person={p} small />
               <span>
                 {p.name}
                 <small>

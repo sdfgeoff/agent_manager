@@ -127,6 +127,13 @@ pub struct UploadAttachment {
 pub struct ReadAttachment {
     pub id: String,
 }
+#[derive(Deserialize, JsonSchema)]
+pub struct SetAvatar {
+    /// Defaults to yourself. Humans may manage any active participant; agents only themselves.
+    pub actor: Option<String>,
+    /// Base64 PNG, at most 256 KiB and 512×512 pixels. Null removes the avatar.
+    pub data: Option<String>,
+}
 /// Worker-local upload view. The adapter reads the file inside its workspace.
 #[derive(Deserialize, JsonSchema)]
 pub struct UploadFile {
@@ -187,6 +194,8 @@ pub struct Person {
     #[serde(flatten)]
     pub actor: Actor,
     pub active: bool,
+    #[serde(rename = "avatarUrl")]
+    pub avatar_url: Option<String>,
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -421,6 +430,7 @@ pub fn operations() -> Vec<Operation> {
         endpoint::<UpdateReminder,Reminder>("update_reminder","Replace an active reminder you own. Same fields and timestamp units as create_reminder; omitted repeatSeconds/topic clear those fields.",false,false),
         endpoint::<Id,Reminder>("cancel_reminder","Cancel your own active reminder. Previously delivered inbox items remain.",false,false),
         endpoint::<Empty,Overview>("overview","Discover your identity, people, channels, subscriptions and serverTime (current UTC Unix seconds for scheduling).",true,false),
+        endpoint::<SetAvatar,OkReply>("set_avatar","Set or remove a shared profile avatar. Agents may update themselves; humans may update any active participant. Supply base64 PNG up to 256 KiB and 512×512 pixels, or null to remove.",false,false),
         endpoint::<CreateChannel,Channel>("create_channel","Create a shared channel.",false,false),
         endpoint::<ListTopics,Topics>("list_topics","List/search topics, newest first, with pagination. Status: discussion, working, done, archived.",true,false),
         endpoint::<ReadTopic,Topic>("read_topic","Read a topic, opening attachments and latest replies. Use before for older replies.",true,false),

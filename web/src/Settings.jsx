@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { api } from "./api";
 import { useApp } from "./context";
-import { ErrorMessage, BusyButton } from "./components";
+import { ErrorMessage, BusyButton, AvatarEditor, Person } from "./components";
 function needsHomeScreen() {
   return (
     (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
@@ -262,6 +262,16 @@ export default function Settings() {
       )}
       <div className="settings-grid">
         <section className="settings-card">
+          <h2>Your avatar</h2>
+          {app.people.find((p) => p.id === `human:${app.me.username}`) && (
+            <AvatarEditor
+              person={app.people.find(
+                (p) => p.id === `human:${app.me.username}`,
+              )}
+            />
+          )}
+        </section>
+        <section className="settings-card">
           <div className="section-title">
             <KeyRound size={20} />
             <h2>Change your password</h2>
@@ -320,7 +330,7 @@ export default function Settings() {
             {users.map((user) => (
               <div key={user.username}>
                 <strong>
-                  {user.username}
+                  <Person id={`human:${user.username}`} />
                   {user.username === app.me.username ? " (you)" : ""}
                 </strong>
                 <small>

@@ -35,7 +35,7 @@ export default function Topics({ params }) {
   const [cursor, setCursor] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [create, setCreate] = useState(false);
+  const composer = useRef(null);
   const [query, setQuery] = useState(search);
   const generation = useRef(0);
   const channelInfo = app.channels.find((c) => c.id === channel);
@@ -148,170 +148,179 @@ export default function Topics({ params }) {
   return (
     <div className={`topics-workspace ${selected ? "with-detail" : ""}`}>
       <section className={`topic-browser ${selected ? "has-selection" : ""}`}>
-        <div className="page-heading">
-          <div>
-            <p className="eyebrow">SHARED WORKSPACE</p>
-            <h1>#{channelInfo?.name || "general"}</h1>
-            <p>
-              {channelInfo?.description || "Conversations and work, together."}
-            </p>
+        <div className="topic-browser-content">
+          <div className="page-heading">
+            <div>
+              <p className="eyebrow">SHARED WORKSPACE</p>
+              <h1>#{channelInfo?.name || "general"}</h1>
+              <p>
+                {channelInfo?.description ||
+                  "Conversations and work, together."}
+              </p>
+            </div>
+            <div className="actions">
+              <button
+                onClick={subscribe}
+                title="Channel subscriptions notify you about new topics"
+              >
+                {channelInfo?.subscribed ? (
+                  <BellOff size={16} />
+                ) : (
+                  <Bell size={16} />
+                )}
+                <span>
+                  {channelInfo?.subscribed ? "Subscribed" : "Subscribe"}
+                </span>
+              </button>
+              <button
+                className="primary"
+                onClick={() =>
+                  composer.current?.querySelector("textarea")?.focus()
+                }
+              >
+                <Plus size={16} />
+                New topic
+              </button>
+            </div>
           </div>
-          <div className="actions">
-            <button
-              onClick={subscribe}
-              title="Channel subscriptions notify you about new topics"
+          <div className="topic-controls">
+            <div className="view-switch" aria-label="Topic view">
+              <button
+                className={view === "threads" ? "active" : ""}
+                onClick={() => patch({ view: "threads" })}
+              >
+                <List size={16} />
+                Threads
+              </button>
+              <button
+                className={view === "kanban" ? "active" : ""}
+                onClick={() => patch({ view: "kanban" })}
+              >
+                <Columns3 size={16} />
+                Kanban
+              </button>
+            </div>
+            <div className="search-input">
+              <Search size={16} />
+              <input
+                aria-label="Search topics"
+                placeholder="Search topics and replies"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="filters">
+            <select
+              aria-label="Filter by status"
+              value={status}
+              onChange={(e) => patch({ status: e.target.value })}
             >
-              {channelInfo?.subscribed ? (
-                <BellOff size={16} />
-              ) : (
-                <Bell size={16} />
-              )}
-              <span>
-                {channelInfo?.subscribed ? "Subscribed" : "Subscribe"}
-              </span>
-            </button>
-            <button className="primary" onClick={() => setCreate((c) => !c)}>
-              <Plus size={16} />
-              New topic
-            </button>
-          </div>
-        </div>
-        <div className="topic-controls">
-          <div className="view-switch" aria-label="Topic view">
-            <button
-              className={view === "threads" ? "active" : ""}
-              onClick={() => patch({ view: "threads" })}
+              <option value="">All statuses</option>
+              {["discussion", "working", "done", "archived"].map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="Filter by assignee"
+              value={assignee}
+              onChange={(e) => patch({ assignee: e.target.value })}
             >
-              <List size={16} />
-              Threads
-            </button>
-            <button
-              className={view === "kanban" ? "active" : ""}
-              onClick={() => patch({ view: "kanban" })}
-            >
-              <Columns3 size={16} />
-              Kanban
-            </button>
-          </div>
-          <div className="search-input">
-            <Search size={16} />
-            <input
-              aria-label="Search topics"
-              placeholder="Search topics and replies"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-          </div>
-        </div>
-        <div className="filters">
-          <select
-            aria-label="Filter by status"
-            value={status}
-            onChange={(e) => patch({ status: e.target.value })}
-          >
-            <option value="">All statuses</option>
-            {["discussion", "working", "done", "archived"].map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-          <select
-            aria-label="Filter by assignee"
-            value={assignee}
-            onChange={(e) => patch({ assignee: e.target.value })}
-          >
-            <option value="">Everyone</option>
-            {app.people.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          {view === "kanban" && (
+              <option value="">Everyone</option>
+              {app.people.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            {view === "kanban" && (
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={showDiscussion}
+                  onChange={(e) =>
+                    patch({ discussion: e.target.checked ? "1" : "" })
+                  }
+                />
+                Show Discussion
+              </label>
+            )}
             <label className="check">
               <input
                 type="checkbox"
-                checked={showDiscussion}
+                checked={showArchived}
                 onChange={(e) =>
-                  patch({ discussion: e.target.checked ? "1" : "" })
+                  patch({ archived: e.target.checked ? "1" : "" })
                 }
               />
-              Show Discussion
+              Show Archived
             </label>
+            <span className="muted result-count">{visible.length} loaded</span>
+          </div>
+          <ErrorMessage error={error} />
+          {view === "kanban" ? (
+            <div className="kanban">
+              {columns.map((s) => (
+                <section className="kanban-column" key={s}>
+                  <h2>
+                    <span className={`status-dot ${s}`} />
+                    {s}
+                    <small>
+                      {visible.filter((t) => t.status === s).length}
+                    </small>
+                  </h2>
+                  {visible.filter((t) => t.status === s).map(card)}
+                </section>
+              ))}
+            </div>
+          ) : (
+            <div className="topic-list">{visible.map(card)}</div>
           )}
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={showArchived}
-              onChange={(e) => patch({ archived: e.target.checked ? "1" : "" })}
-            />
-            Show Archived
-          </label>
-          <span className="muted result-count">{visible.length} loaded</span>
+          {!visible.length && !loading && (
+            <div className="empty">
+              <MessageSquare size={30} />
+              <h2>
+                {view === "kanban"
+                  ? "No topics in these columns"
+                  : "No topics yet"}
+              </h2>
+              <p>
+                {view === "kanban"
+                  ? "Discussion is hidden by default. Reveal it or start something new."
+                  : "Start a discussion, mention a teammate, and take it from there."}
+              </p>
+            </div>
+          )}
+          {cursor && (
+            <button
+              className="load-more"
+              disabled={loading}
+              onClick={() => load(true)}
+            >
+              {loading ? "Loading…" : "Load more topics"}
+            </button>
+          )}
         </div>
-        <ErrorMessage error={error} />
-        {create && (
-          <div className="new-topic">
-            <h2>Start a discussion</h2>
-            <p className="muted">
-              New topics start in Discussion. Move them to Working when ready.
-            </p>
-            <Composer
-              key={channel}
-              draftKey={`new-topic:${channel}`}
-              title
-              label="New topic message"
-              buttonText="Create topic"
-              onSubmit={async (data) => {
-                const t = await board("create_topic", { ...data, channel });
-                setCreate(false);
-                patch({ topic: t.id });
-                app.changed();
-              }}
-            />
-          </div>
-        )}
-        {view === "kanban" ? (
-          <div className="kanban">
-            {columns.map((s) => (
-              <section className="kanban-column" key={s}>
-                <h2>
-                  <span className={`status-dot ${s}`} />
-                  {s}
-                  <small>{visible.filter((t) => t.status === s).length}</small>
-                </h2>
-                {visible.filter((t) => t.status === s).map(card)}
-              </section>
-            ))}
-          </div>
-        ) : (
-          <div className="topic-list">{visible.map(card)}</div>
-        )}
-        {!visible.length && !loading && (
-          <div className="empty">
-            <MessageSquare size={30} />
-            <h2>
-              {view === "kanban"
-                ? "No topics in these columns"
-                : "No topics yet"}
-            </h2>
-            <p>
-              {view === "kanban"
-                ? "Discussion is hidden by default. Reveal it or start something new."
-                : "Start a discussion, mention a teammate, and take it from there."}
-            </p>
-          </div>
-        )}
-        {cursor && (
-          <button
-            className="load-more"
-            disabled={loading}
-            onClick={() => load(true)}
-          >
-            {loading ? "Loading…" : "Load more topics"}
-          </button>
-        )}
+        <div className="channel-composer" ref={composer}>
+          <p className="field-hint">
+            New topic in #{channelInfo?.name || "general"}
+          </p>
+          <Composer
+            key={channel}
+            draftKey={`new-topic:${channel}`}
+            title
+            label="New topic message"
+            placeholder="Start a new topic… Type @ to mention someone."
+            buttonText="Post topic"
+            onSubmit={async (data) => {
+              const t = await board("create_topic", { ...data, channel });
+              patch({ topic: t.id });
+              app.changed();
+            }}
+          />
+        </div>
       </section>
       {selected && (
         <TopicDetail

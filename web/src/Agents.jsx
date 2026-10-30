@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { board, rpc, href, navigate, authGuard } from "./api";
 import { useApp } from "./context";
-import { Modal, ErrorMessage, BusyButton } from "./components";
+import { Modal, ErrorMessage, BusyButton, Avatar } from "./components";
 export function FolderPicker({ worker, value, onChange }) {
   const [open, setOpen] = useState(false);
   const [path, setPath] = useState(value || "~");
@@ -485,9 +485,14 @@ export default function Agents({ params }) {
         {app.agents.map((a) => (
           <article className="agent-card" key={a.id}>
             <div className="agent-heading">
-              <span className="avatar">
-                <Bot size={24} />
-              </span>
+              <button
+                type="button"
+                className="avatar-button"
+                aria-label={`View ${a.name} profile`}
+                onClick={() => app.openPerson(a.id)}
+              >
+                <Avatar person={app.people.find((p) => p.id === a.id) || a} />
+              </button>
               <div>
                 <h2>{a.name}</h2>
                 <span className="muted">@{a.handle}</span>

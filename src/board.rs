@@ -31,6 +31,7 @@ pub struct Agent {
 pub fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch("BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS board_actors(id TEXT PRIMARY KEY,handle TEXT NOT NULL UNIQUE,name TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('human','agent')));
+CREATE TABLE IF NOT EXISTS board_avatars(actor TEXT PRIMARY KEY REFERENCES board_actors(id) ON DELETE CASCADE,data BLOB NOT NULL,revision TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS board_agents(id TEXT PRIMARY KEY REFERENCES board_actors(id),worker TEXT NOT NULL,thread TEXT NOT NULL,persona TEXT NOT NULL,settings TEXT NOT NULL,paused INTEGER NOT NULL DEFAULT 0,token_hash TEXT NOT NULL UNIQUE,error TEXT,UNIQUE(worker,thread));
 CREATE TABLE IF NOT EXISTS board_channels(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,description TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS board_agent_registrations(id TEXT PRIMARY KEY,worker TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,source_thread TEXT,token_hash TEXT,expires INTEGER NOT NULL,UNIQUE(worker,source_thread));
@@ -344,6 +345,16 @@ impl Store {
             std::fs::read(self.1.join("attachments").join(id))?,
         ))
     }
+    pub fn board_avatar(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT data FROM board_avatars WHERE actor=?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
     pub fn board(&self, actor: &Actor, op: &str, p: &Value) -> Result<Value> {
         ensure!(p.is_object(), "Request must be an object");
         if op == "upload_attachment" {
@@ -387,6 +398,35 @@ impl Store {
             .filter(|s| !s.is_empty() && s.len() <= 100);
         if let Some(request)=request && let Some((old_op,input,result))=tx.query_row("SELECT operation,input,result FROM board_requests WHERE actor=?1 AND request=?2",params![actor.id,request],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?{ensure!(old_op==op&&serde_json::from_str::<Value>(&input)?==*p,"Request id reused with different input");return Ok(serde_json::from_str(&result)?);}
         let result = match op {
+            "set_avatar" => {
+                let target = p["actor"].as_str().unwrap_or(&actor.id);
+                ensure!(
+                    actor.kind == "human" || target == actor.id,
+                    "You may only change your own avatar"
+                );
+                ensure!(tx.query_row("SELECT EXISTS(SELECT 1 FROM board_actors a WHERE a.id=?1 AND (a.kind='agent' OR EXISTS(SELECT 1 FROM users u WHERE a.id='human:'||u.username)))", [target], |r| r.get::<_,bool>(0))?, "Active participant not found");
+                if p["data"].is_null() {
+                    tx.execute("DELETE FROM board_avatars WHERE actor=?1", [target])?;
+                } else {
+                    let bytes = STANDARD.decode(string(p, "data", 256 * 1024 * 4 / 3 + 8)?)?;
+                    ensure!(bytes.len() <= 256 * 1024, "Avatar exceeds 256 KiB");
+                    ensure!(
+                        bytes.len() >= 33
+                            && bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+                            && &bytes[12..16] == b"IHDR",
+                        "Avatar must be a PNG image"
+                    );
+                    let width = u32::from_be_bytes(bytes[16..20].try_into()?);
+                    let height = u32::from_be_bytes(bytes[20..24].try_into()?);
+                    ensure!(
+                        (1..=512).contains(&width) && (1..=512).contains(&height),
+                        "Avatar dimensions must be at most 512×512 pixels"
+                    );
+                    let revision = security::digest(&STANDARD.encode(&bytes));
+                    tx.execute("INSERT INTO board_avatars(actor,data,revision) VALUES(?1,?2,?3) ON CONFLICT(actor) DO UPDATE SET data=excluded.data,revision=excluded.revision", params![target,bytes,revision])?;
+                }
+                json!({"ok":true})
+            }
             "create_reminder" | "update_reminder" | "cancel_reminder" | "list_reminders"
             | "read_reminder" => crate::reminders::operation(&tx, actor, op, p)?,
             "search" => crate::search::board_search(&tx, actor, p)?,
@@ -404,8 +444,8 @@ impl Store {
             }
             "overview" => {
                 let people = tx
-                    .prepare("SELECT a.id,a.handle,a.name,a.kind,(a.kind='agent' OR EXISTS(SELECT 1 FROM users u WHERE a.id='human:'||u.username)) FROM board_actors a ORDER BY kind,name")?
-                    .query_map([],|r|{let mut value=json!(actor_row(r)?);value["active"]=json!(r.get::<_,bool>(4)?);Ok(value)})?
+                    .prepare("SELECT a.id,a.handle,a.name,a.kind,(a.kind='agent' OR EXISTS(SELECT 1 FROM users u WHERE a.id='human:'||u.username)),v.revision FROM board_actors a LEFT JOIN board_avatars v ON v.actor=a.id ORDER BY kind,name")?
+                    .query_map([],|r|{let mut value=json!(actor_row(r)?);value["active"]=json!(r.get::<_,bool>(4)?);value["avatarUrl"]=json!(r.get::<_,Option<String>>(5)?.map(|v|format!("/api/avatars/{}?v={v}",r.get::<_,String>(0).unwrap())));Ok(value)})?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 let channels=tx.prepare("SELECT c.id,c.name,c.description,COALESCE(s.subscribed,0) FROM board_channels c LEFT JOIN board_subscriptions s ON s.kind='channel' AND s.target=c.id AND s.actor=?1 ORDER BY c.name")?.query_map([&actor.id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"name":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,"subscribed":r.get::<_,bool>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 json!({"me":actor,"people":people,"channels":channels,"statuses":STATUSES,"serverTime":now()})

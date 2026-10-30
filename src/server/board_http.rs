@@ -5,6 +5,7 @@ use axum::routing::post;
 pub(super) fn routes() -> Router<Arc<App>> {
     let mut routes = Router::new()
         .route("/api/board/openapi.json", get(openapi))
+        .route("/api/avatars/{id}", get(avatar))
         .route("/api/attachments/{id}", get(attachment));
     for op in crate::board_api::operations() {
         routes = routes.route(
@@ -348,6 +349,26 @@ async fn operation(
         app.board_wake.notify_one();
     }
     Ok(Json(result))
+}
+async fn avatar(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    actor(&app, &headers, false)?;
+    let bytes = app
+        .store
+        .board_avatar(&id)?
+        .ok_or_else(|| rejected(StatusCode::NOT_FOUND, "Avatar not found"))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "private, no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 async fn attachment(
     State(app): State<Arc<App>>,

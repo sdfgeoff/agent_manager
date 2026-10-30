@@ -26,7 +26,7 @@ import {
   newAuthScope,
 } from "./api";
 import { AppContext } from "./context";
-import { Modal, ErrorMessage } from "./components";
+import { Modal, ErrorMessage, Avatar, AvatarEditor } from "./components";
 import Topics, { NewChannel } from "./Topics";
 import Sessions from "./Sessions";
 import Agents from "./Agents";
@@ -394,13 +394,11 @@ export default function App() {
         {viewingPerson && (
           <Modal title={viewingPerson.name} onClose={() => setPerson(null)}>
             <div className="person-detail">
-              <span className="avatar">
-                {viewingPerson.kind === "agent" ? (
-                  <Bot size={24} />
-                ) : (
-                  <Users size={24} />
-                )}
-              </span>
+              {viewingPerson.active !== false ? (
+                <AvatarEditor key={viewingPerson.id} person={viewingPerson} />
+              ) : (
+                <Avatar person={viewingPerson} />
+              )}
               <h3>@{viewingPerson.handle}</h3>
               <p className="muted">
                 {viewingPerson.kind === "agent"
