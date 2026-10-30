@@ -441,7 +441,7 @@ export default function App() {
   );
 }
 function Login({ onSubmit, outerError }) {
-  const [username, setUsername] = useState("admin");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
