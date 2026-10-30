@@ -9,14 +9,14 @@ use std::collections::BTreeSet;
 
 pub const STATUSES: [&str; 4] = ["discussion", "working", "done", "archived"];
 pub const MAX_FILE: usize = 20 * 1024 * 1024;
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Actor {
     pub id: String,
     pub handle: String,
     pub name: String,
     pub kind: String,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Agent {
     pub id: String,
     pub handle: String,

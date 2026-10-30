@@ -812,3 +812,99 @@ async fn reminders_and_search_require_authentication_and_human_csrf() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn generated_openapi_requires_auth_and_registered_types_validate_real_endpoints() {
+    let s = Server::new().await;
+    let cookie = s.login().await;
+    let url = format!("{}/api/board/openapi.json", s.url);
+    assert_eq!(
+        s.client.get(&url).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = s
+        .client
+        .get(&url)
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+    let doc = response.json::<Value>().await.unwrap();
+    assert_eq!(doc["openapi"], "3.1.1");
+    assert_eq!(
+        doc["components"]["securitySchemes"]["browserSession"]["name"],
+        "am"
+    );
+    let schema = &doc["paths"]["/api/board/create_reminder"]["post"]["requestBody"]["content"]["application/json"]
+        ["schema"];
+    assert_eq!(schema["properties"]["dueAt"]["type"], "integer");
+    assert!(
+        schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "message")
+    );
+    assert!(
+        doc["paths"]["/api/board/create_agent"]["post"]
+            .get("x-mcp")
+            .is_none()
+    );
+    assert!(doc["paths"].get("/api/settings/users").is_none());
+    assert_eq!(
+        s.client
+            .get(&url)
+            .header("Cookie", &cookie)
+            .header("If-None-Match", &etag)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_MODIFIED
+    );
+    // Schema types are executable endpoint validation, not disconnected JSON documentation.
+    let response = s
+        .client
+        .post(format!("{}/api/board/create_reminder", s.url))
+        .header("Cookie", &cookie)
+        .header("Origin", &s.url)
+        .header("X-Agentmanager", "1")
+        .json(&json!({"message":"A reminder","dueAt":"not a timestamp"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let mut events = s
+        .client
+        .get(format!("{}/api/events", s.url))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let first = events.chunk().await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("heartbeat"));
+    for (op, p) in [
+        ("agent_activity", json!({})),
+        ("list_reminders", json!({})),
+        ("search", json!({"query":"not-found"})),
+    ] {
+        let r = s
+            .client
+            .post(format!("{}/api/board/{op}", s.url))
+            .header("Cookie", &cookie)
+            .header("Origin", &s.url)
+            .header("X-Agentmanager", "1")
+            .json(&p)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "{op}");
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), events.chunk())
+            .await
+            .is_err(),
+        "Read-only operations must not publish change events"
+    );
+}

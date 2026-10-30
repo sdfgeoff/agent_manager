@@ -1,8 +1,10 @@
 pub mod agent_runtime;
 pub mod board;
+pub mod board_api;
 pub mod catalog;
 pub mod codex;
 pub mod mcp;
+pub mod mcp_catalog;
 pub mod push;
 pub mod reminders;
 pub mod search;

@@ -404,13 +404,37 @@ async fn installed_codex_agent_configuration() {
     let imported =
         agentmanager::agent_runtime::session_instructions(&reader, id, &started["thread"]).unwrap();
     assert_eq!(imported, persona);
+    // Discovery now comes from a real authenticated API, not a worker-local list.
+    let store = agentmanager::store::Store::open(&dir.path().join("server")).unwrap();
+    store.set_password("unused-native-smoke-hash").unwrap();
+    let key = store.enrollment().unwrap();
+    let (worker, _) = store.enroll(&key, "isolated native smoke").unwrap();
+    let token = agentmanager::security::token();
+    store
+        .board_add_agent(
+            &agentmanager::board::Agent {
+                id: "native-smoke-agent".into(),
+                handle: "native-smoke".into(),
+                name: "Native smoke".into(),
+                worker,
+                thread: id.into(),
+                persona: persona.into(),
+                settings: json!({}),
+                paused: true,
+                error: None,
+            },
+            &token,
+        )
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    let app = agentmanager::server::App::new(store, &host).unwrap();
+    let routes = agentmanager::server::router(app.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, routes).await.unwrap() });
     let credential = dir.path().join("mcp.json");
     agentmanager::security::private_write(
         &credential,
-        &serde_json::to_vec(
-            &json!({"host":"http://127.0.0.1:9","token":"isolated-test-token","cwd":dir.path()}),
-        )
-        .unwrap(),
+        &serde_json::to_vec(&json!({"host":host,"token":token,"cwd":dir.path()})).unwrap(),
     )
     .unwrap();
     codex
@@ -461,6 +485,8 @@ async fn installed_codex_agent_configuration() {
             .any(|r| r["thread"] == id),
         "{search}"
     );
+    app.shutdown();
+    server.abort();
 }
 
 #[tokio::test]

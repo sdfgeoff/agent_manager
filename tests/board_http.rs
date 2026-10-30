@@ -177,6 +177,34 @@ async fn authenticated_board_and_agent_credentials_are_separate_from_host_admini
         error: None,
     };
     f.app.store.board_add_agent(&agent, &token).unwrap();
+    let catalogue = f
+        .client
+        .get(format!("{}/api/board/openapi.json", f.url))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert!(catalogue["paths"].get("/api/board/create_agent").is_none());
+    assert!(catalogue["paths"].get("/api/board/list_agents").is_none());
+    assert!(
+        catalogue["paths"]
+            .get("/api/board/read_notification")
+            .is_some()
+    );
+    assert_eq!(
+        f.client
+            .get(format!("{}/api/board/openapi.json", f.url))
+            .bearer_auth(&token)
+            .header("Origin", &f.url)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
     let url = format!("{}/api/board/create_topic", f.url);
     assert_eq!(
         f.client

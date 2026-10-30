@@ -3,12 +3,18 @@ use crate::board::{Actor, Agent};
 use axum::routing::post;
 
 pub(super) fn routes() -> Router<Arc<App>> {
-    Router::new()
-        .route(
-            "/api/board/{operation}",
-            post(operation).layer(DefaultBodyLimit::max(29 * 1024 * 1024)),
-        )
-        .route("/api/attachments/{id}", get(attachment))
+    let mut routes = Router::new()
+        .route("/api/board/openapi.json", get(openapi))
+        .route("/api/attachments/{id}", get(attachment));
+    for op in crate::board_api::operations() {
+        routes = routes.route(
+            &op.path(),
+            post(operation)
+                .layer::<_, Infallible>(axum::Extension(op))
+                .layer::<_, Infallible>(DefaultBodyLimit::max(29 * 1024 * 1024)),
+        );
+    }
+    routes
 }
 fn domain(error: anyhow::Error) -> ApiError {
     tracing::debug!(%error,"Board request rejected");
@@ -69,20 +75,41 @@ fn capable(app: &App, worker: &str) -> ApiResult<()> {
     }
     Ok(())
 }
+async fn openapi(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Response> {
+    let who = actor(&app, &headers, false)?;
+    let document = crate::board_api::document(
+        who.kind == "human",
+        if app.secure { "__Host-am" } else { "am" },
+    );
+    let etag = format!("\"{}\"", security::digest(&document.to_string()));
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        == Some(etag.as_str())
+    {
+        return Ok((StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response());
+    }
+    Ok(([(header::ETAG, etag)], Json(document)).into_response())
+}
 async fn operation(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
-    Path(op): Path<String>,
+    axum::Extension(endpoint): axum::Extension<crate::board_api::Operation>,
     Json(p): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let who = actor(&app, &headers, true)?;
+    if endpoint.human_only && who.kind != "human" {
+        return Err(rejected(StatusCode::FORBIDDEN, "Human account required"));
+    }
+    (endpoint.validate)(&p).map_err(domain)?;
+    let op = endpoint.name;
     if !p.is_object() {
         return Err(rejected(
             StatusCode::BAD_REQUEST,
             "Request must be an object",
         ));
     }
-    let result = match op.as_str() {
+    let result = match op {
         "list_agents" => {
             // Credentials and private delivery journals are never included.
             let agents = app.store.board_agents()?;
@@ -251,18 +278,13 @@ async fn operation(
             };
             json!({"agent":app.store.board_agent(id)?,"synchronized":synchronized})
         }
-        _ => app.store.board(&who, &op, &p).map_err(domain)?,
+        _ => app.store.board(&who, op, &p).map_err(domain)?,
     };
-    if !matches!(
-        op.as_str(),
-        "agent_subscriptions"
-            | "overview"
-            | "list_topics"
-            | "read_topic"
-            | "list_notifications"
-            | "list_agents"
-            | "read_attachment"
-    ) {
+    (endpoint.validate_response)(&result).map_err(|error| {
+        tracing::error!(operation=op,%error,"Invalid board response");
+        rejected(StatusCode::INTERNAL_SERVER_ERROR, "Invalid board response")
+    })?;
+    if !endpoint.readonly {
         app.emit(json!({"type":"board_changed"}));
         app.board_wake.notify_one();
     }
