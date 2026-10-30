@@ -430,7 +430,11 @@ async fn installed_codex_agent_configuration() {
             .unwrap()
             .iter()
             .find(|s| s["name"] == "agentmanager_board")
-            && server["tools"].as_object().is_some_and(|t| t.len() == 12)
+            && server["tools"].as_object().is_some_and(|t| {
+                t.contains_key("create_reminder")
+                    && t.contains_key("search")
+                    && t.contains_key("post_reply")
+            })
         {
             break;
         }
@@ -440,4 +444,57 @@ async fn installed_codex_agent_configuration() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    // Context-only empty threads are retained by the creating worker's catalogue;
+    // Codex intentionally omits them from discovery by another process.
+    let search = worker::dispatch(
+        codex,
+        "manager/search",
+        json!({"query":"Context-only test"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        search["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["thread"] == id),
+        "{search}"
+    );
+}
+
+#[tokio::test]
+async fn session_search_reads_all_folders_without_resuming_or_starting_a_turn() {
+    let dir = test_support::tempdir();
+    let binary = dir.path().join("codex-search");
+    std::fs::write(&binary, include_str!("fixtures/codex.py")).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let saved = json!({
+        "old-cli":{"id":"old-cli","name":"Earlier CLI","source":"cli","cwd":"/projects/one","preview":"Old project","updatedAt":20,"turns":[{"id":"t1","items":[{"id":"u1","type":"userMessage","content":[{"type":"text","text":"copper reactor design"}]},{"id":"a1","type":"agentMessage","text":"Cooling uses copper pipes"}]}]},
+        "desktop":{"id":"desktop","archived":true,"name":"Desktop conversation","source":"vscode","cwd":"/unrelated/root","preview":"Other work","updatedAt":10,"turns":[{"id":"t2","items":[{"id":"a2","type":"agentMessage","text":"A copper valve"}]}]}
+    });
+    std::fs::write(
+        binary.with_extension("state.json"),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+    let codex = Codex::spawn(binary.to_str().unwrap()).await.unwrap();
+    let result = worker::dispatch(codex.clone(), "manager/search", json!({"query":"copper"}))
+        .await
+        .unwrap();
+    assert_eq!(result["data"].as_array().unwrap().len(), 3, "{result}");
+    assert!(
+        result["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["cwd"] == "/unrelated/root")
+    );
+    let calls = std::fs::read_to_string(binary.with_extension("calls.jsonl")).unwrap();
+    assert!(!calls.contains("thread/resume") && !calls.contains("turn/start"));
+    assert!(
+        worker::dispatch(codex, "manager/search", json!({"query":"x"}))
+            .await
+            .is_err()
+    );
 }

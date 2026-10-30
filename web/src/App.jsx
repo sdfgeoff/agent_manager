@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   MessagesSquare,
+  Activity as ActivityIcon,
+  Search as SearchIcon,
   Terminal,
   Bot,
   Bell,
@@ -30,6 +32,8 @@ import Sessions from "./Sessions";
 import Agents from "./Agents";
 import SettingsPage, { revokeLocalPush } from "./Settings";
 import Inbox from "./Inbox";
+import Activity from "./Activity";
+import Search from "./Search";
 export default function App() {
   const [me, setMe] = useState(undefined);
   const [overview, setOverview] = useState({ people: [], channels: [] });
@@ -239,6 +243,8 @@ export default function App() {
   const activeChannel =
     Number(current.params.get("channel")) || overview.channels[0]?.id;
   const pages = [
+    ["activity", "Activity", ActivityIcon],
+    ["search", "Search", SearchIcon],
     ["topics", "Topics", MessagesSquare],
     ["sessions", "Sessions", Terminal],
     ["agents", "Agents", Bot],
@@ -373,6 +379,8 @@ export default function App() {
             </div>
           )}
           <main className={`main-view view-${page}`}>
+            {page === "activity" && <Activity />}
+            {page === "search" && <Search params={current.params} />}
             {page === "topics" && <Topics params={current.params} />}{" "}
             {page === "sessions" && <Sessions params={current.params} />}{" "}
             {page === "agents" && <Agents params={current.params} />}{" "}

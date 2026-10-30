@@ -322,6 +322,11 @@ pub(super) fn start(app: &Arc<App>) {
             tokio::select! {_=tick.tick()=>{},_=waiting.board_wake.notified()=>{}};
             drop(waiting);
             let Some(app) = weak.upgrade() else { break };
+            match app.store.fire_reminders(now()) {
+                Ok(n) if n > 0 => app.emit(json!({"type":"board_changed"})),
+                Ok(_) => {}
+                Err(error) => tracing::error!(%error,"Cannot deliver due reminders"),
+            }
             let agents = match app.store.board_agents() {
                 Ok(a) => a,
                 Err(e) => {

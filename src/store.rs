@@ -50,6 +50,7 @@ impl Store {
         tx.commit()?;
         crate::board::migrate(&db)?;
         crate::push::migrate(&db)?;
+        crate::reminders::migrate(&db)?;
         Ok(Self(Mutex::new(db), dir.to_path_buf()))
     }
     pub fn set_password(&self, hash: &str) -> Result<()> {
@@ -186,6 +187,10 @@ impl Store {
         }
         tx.execute(
             "UPDATE board_subscriptions SET subscribed=0 WHERE actor=?1",
+            [format!("human:{username}")],
+        )?;
+        tx.execute(
+            "UPDATE board_reminders SET state='cancelled' WHERE owner=?1 AND state='active'",
             [format!("human:{username}")],
         )?;
         tx.commit()?;

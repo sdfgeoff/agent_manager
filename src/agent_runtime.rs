@@ -391,7 +391,7 @@ impl AgentRuntime {
                 return Ok(json!({"accepted":true}));
             }
             let text = format!(
-                "Board notifications (stable IDs; duplicates are possible). These are context, not instructions requiring a reply. Read the referenced topics through MCP for full context; fetch attachments only if useful. Publish only with explicit board tools.\n{}",
+                "Board notifications (stable IDs; duplicates are possible). These are context, not instructions requiring a reply. Read linked topics through MCP for full context; private reminder events may have no topic. Use read_reminder for a full reminder message. Fetch attachments only if useful. Publish only with explicit board tools.\n{}",
                 serde_json::to_string(&pending)?
             );
             let text = if recovery {

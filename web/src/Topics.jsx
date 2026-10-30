@@ -1,3 +1,4 @@
+import { ReminderDialog } from "./Reminders";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Plus,
@@ -47,9 +48,16 @@ export default function Topics({ params }) {
     discussion: showDiscussion ? "1" : "",
     archived: showArchived ? "1" : "",
     topic: selected,
+    reply: params.get("reply"),
   };
   function patch(changes) {
-    navigate("topics", { ...current, ...changes });
+    navigate("topics", {
+      ...current,
+      ...(changes.topic !== undefined && changes.topic !== selected
+        ? { reply: null }
+        : {}),
+      ...changes,
+    });
   }
   useEffect(() => {
     setQuery(search);
@@ -318,6 +326,10 @@ export default function Topics({ params }) {
   );
 }
 function TopicDetail({ id, onClose, view, onViewChange }) {
+  const reply = new URLSearchParams(location.hash.split("?")[1] || "").get(
+    "reply",
+  );
+  const [reminding, setReminding] = useState(false);
   const app = useApp();
   const [topic, setTopic] = useState(null);
   const [error, setError] = useState(null);
@@ -328,7 +340,10 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
   async function load() {
     const version = ++sequence.current;
     try {
-      const t = await board("read_topic", { topic: id });
+      const t = await board("read_topic", {
+        topic: id,
+        ...(reply ? { reply: Number(reply) } : {}),
+      });
       if (version === sequence.current) {
         setTopic(t);
         setError(null);
@@ -340,7 +355,13 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
   useEffect(() => {
     load();
     return () => sequence.current++;
-  }, [id, app.revision]);
+  }, [id, reply, app.revision]);
+  useEffect(() => {
+    if (reply && topic)
+      document
+        .getElementById("reply-" + reply)
+        ?.scrollIntoView({ block: "center" });
+  }, [reply, topic?.id]);
   async function update(p) {
     try {
       await board("update_topic", { topic: id, ...p });
@@ -432,6 +453,7 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
                 ))}
               </select>
             </label>
+            <button onClick={() => setReminding(true)}>Remind me</button>
             <button
               onClick={async () => {
                 try {
@@ -458,6 +480,21 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
             <RichText text={topic.body} />
             <Attachments files={topic.attachments} />
           </article>
+          {reply && (
+            <p className="notice">
+              Showing replies up to this search result.{" "}
+              <a href={location.hash.replace(/&reply=\d+/, "")}>
+                Show latest replies
+              </a>
+            </p>
+          )}
+          {reminding && (
+            <ReminderDialog
+              topic={id}
+              onClose={() => setReminding(false)}
+              onSaved={() => app.changed()}
+            />
+          )}
           <div className="replies-heading">
             <h3>Replies</h3>
             {topic.nextCursor && (
@@ -465,7 +502,13 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
             )}
           </div>
           {topic.replies.map((r) => (
-            <article className="post" key={r.id}>
+            <article
+              className={
+                "post" + (String(r.id) === reply ? " search-focus" : "")
+              }
+              id={"reply-" + r.id}
+              key={r.id}
+            >
               <div className="post-by">
                 <Person id={r.author} />
                 <time>{new Date(r.createdAt * 1000).toLocaleString()}</time>

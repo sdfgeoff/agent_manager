@@ -21,6 +21,8 @@ struct PendingCall {
 pub struct Codex {
     pub catalog: crate::catalog::Catalog,
     pub agents: crate::agent_runtime::AgentRuntime,
+    pub search: Arc<Mutex<crate::search::Index>>,
+    pub search_gate: tokio::sync::Mutex<()>,
     writer: mpsc::Sender<Value>,
     pending: Mutex<HashMap<String, PendingCall>>,
     requests: Mutex<HashMap<String, Value>>,
@@ -39,6 +41,12 @@ impl Codex {
         catalog_path: Option<std::path::PathBuf>,
     ) -> Result<Arc<Self>> {
         let agents = crate::agent_runtime::AgentRuntime::open(catalog_path.as_deref())?;
+        let search = crate::search::Index::open(
+            catalog_path
+                .as_ref()
+                .map(|p| p.with_extension("search.sqlite3"))
+                .as_deref(),
+        )?;
         let catalog = crate::catalog::Catalog::open(catalog_path)?;
         let mut child = Command::new(binary)
             .args(["app-server", "--listen", "stdio://"])
@@ -56,6 +64,8 @@ impl Codex {
         let (tx, mut rx) = mpsc::channel::<Value>(128);
         let codex = Arc::new(Self {
             catalog,
+            search: Arc::new(Mutex::new(search)),
+            search_gate: tokio::sync::Mutex::new(()),
             agents,
             writer: tx,
             pending: Mutex::new(HashMap::new()),
@@ -204,10 +214,13 @@ impl Codex {
         if let Some(cursor) = params["cursor"].as_str() {
             filters["cursor"] = json!(cursor);
         }
+        if params["archived"] == true {
+            filters["archived"] = json!(true);
+        }
         // Deliberately omit cwd: history belongs to the whole Codex home,
         // including CLI and desktop threads in unrelated project directories.
         let mut page = self.call("thread/list", filters).await?;
-        if params["cursor"].as_str().is_none() {
+        if params["cursor"].as_str().is_none() && params["archived"] != true {
             let stored = page["data"]
                 .as_array()
                 .context("Codex returned an invalid session list")?;

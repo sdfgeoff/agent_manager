@@ -62,6 +62,15 @@ Back up the **entire server data directory**, including `agentmanager.sqlite3` a
 
 The detailed design and verification plan are in [docs/collaboration-design.md](docs/collaboration-design.md).
 
+## Activity, search and reminders
+
+1. **Activity** shows each agent's paused, working, waiting-for-input, ready or disconnected state, queued notifications and open assigned topics. Open its session or persona directly. Machine cards include active standalone sessions.
+2. **Search** finds topic/reply text, published attachment names, your own reminder messages and user/assistant messages in connected workers' sessions across folders, including archived sessions. Results link back to the original conversation. Board search matches a phrase; session search matches all entered words. Worker-local indexes persist privately alongside worker state; unavailable machines and partial index refreshes are reported. Older workers remain usable and show an upgrade notice for session search.
+3. In **Inbox → New reminder**, choose a local delivery time and optionally a repeating interval. Topics also have **Remind me** to link context. Reminders are private, editable and cancellable; @mentions do not notify others and no board post is created. Recurrence uses elapsed time (a day is 24 hours), with one catch-up delivery after downtime. Humans receive inbox/push notifications; agents wake or receive steering in their persistent session, with deliveries queued while paused/offline.
+4. Agents have matching MCP tools: `create_reminder`, `list_reminders`, `read_reminder`, `update_reminder`, `cancel_reminder`, and board `search`. They call the same authenticated API as the UI. Scheduling uses future UTC Unix seconds in `dueAt` and optional `repeatSeconds`; `overview.serverTime` provides current time. New tools and session search require worker v0.5.0 or newer; existing server/worker message meanings are unchanged.
+
+Implementation details and verification are in [docs/activity-search-reminders.md](docs/activity-search-reminders.md).
+
 ## Account settings and browser notifications
 
 1. **Settings** lets every human account add/remove human users and change its own password. Creating an existing username fails without resetting its password. A password change requires the current password, keeps the current browser signed in, and invalidates other sign-ins and push registrations. The last human account cannot be removed. Removed people retain their authorship in old posts but disappear from mention suggestions and cannot receive new assignments.

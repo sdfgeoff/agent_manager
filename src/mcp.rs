@@ -5,12 +5,48 @@ use serde_json::{Value, json};
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-pub const GUIDANCE: &str = "You participate in a shared board with humans and agents. Use board tools to read topics and explicitly publish posts. Ordinary final responses stay private. Notifications are context, not an obligation to reply. All channels are visible. Subscribe to channels for new topics and topics for later activity. Mentions, posts and assignments subscribe participants. You have one persistent session across channels. Fetch attachments explicitly; notifications contain metadata only. Keep durable personal notes in your workspace. Do not disclose credentials. Do not create automatic reply loops; contribute when useful.";
+pub const GUIDANCE: &str = "You participate in a shared board with humans and agents. Use board tools to read topics and explicitly publish posts. Ordinary final responses stay private. Notifications are context, not an obligation to reply. All channels are visible. Subscribe to channels for new topics and topics for later activity. Mentions, posts and assignments subscribe participants. You have one persistent session across channels. Fetch attachments explicitly; notifications contain metadata only. Keep durable personal notes in your workspace. Private reminders let you schedule follow-ups for yourself, including recurring fixed intervals; they do not publish posts. Do not disclose credentials. Do not create automatic reply loops; contribute when useful.";
 fn tools() -> Vec<Value> {
     let specs = [
         (
+            "search",
+            "Search shared topics, replies, published attachment names and your own reminders. Private schedules of others are never included.",
+            json!({"query":{"type":"string"},"offset":{"type":"integer"}}),
+            vec!["query"],
+        ),
+        (
+            "create_reminder",
+            "Schedule a PRIVATE reminder for yourself. dueAt is a future UTC Unix timestamp in SECONDS. Optional repeatSeconds is a fixed elapsed interval (1–31536000 seconds), not a calendar rule; missed repeats coalesce. Optional topic links context without posting or subscribing anyone. Fires through your inbox and wakes/steers your same session unless paused.",
+            json!({"message":{"type":"string"},"dueAt":{"type":"integer"},"repeatSeconds":{"type":["integer","null"]},"topic":{"type":["integer","null"]}}),
+            vec!["message", "dueAt"],
+        ),
+        (
+            "list_reminders",
+            "List your PRIVATE upcoming reminders. history=true includes completed/cancelled schedules; before paginates.",
+            json!({"history":{"type":"boolean"},"before":{"type":"integer"}}),
+            vec![],
+        ),
+        (
+            "read_reminder",
+            "Read a reminder you own, including its full message.",
+            json!({"id":{"type":"integer"}}),
+            vec!["id"],
+        ),
+        (
+            "update_reminder",
+            "Replace an active reminder you own. Same fields and timestamp units as create_reminder; omitted repeatSeconds/topic clear those fields.",
+            json!({"id":{"type":"integer"},"message":{"type":"string"},"dueAt":{"type":"integer"},"repeatSeconds":{"type":["integer","null"]},"topic":{"type":["integer","null"]}}),
+            vec!["id", "message", "dueAt"],
+        ),
+        (
+            "cancel_reminder",
+            "Cancel your own active reminder. Previously delivered inbox items remain.",
+            json!({"id":{"type":"integer"}}),
+            vec!["id"],
+        ),
+        (
             "overview",
-            "Discover your identity, people, channels and subscriptions.",
+            "Discover your identity, people, channels, subscriptions and serverTime (current UTC Unix seconds for scheduling).",
             json!({}),
             vec![],
         ),

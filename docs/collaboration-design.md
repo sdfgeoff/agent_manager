@@ -38,3 +38,5 @@
 4. Frontend JavaScript syntax, rustfmt and Clippy are checked locally and in CI. Browser drafts and upload references are cleared at logout; live topic refreshes retain the mounted reply/new-topic composers. This release keeps a small safe Markdown renderer and the embedded asset deployment; React/Vite remain an available future choice.
 
 The v0.4 frontend replaces the original DOM implementation with React/Vite and adds account settings and Web Push; see [frontend-and-push.md](frontend-and-push.md).
+
+Activity, cross-conversation search and private recurring reminders are added in v0.5; see [activity-search-reminders.md](activity-search-reminders.md).

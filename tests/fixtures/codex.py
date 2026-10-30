@@ -49,7 +49,7 @@ for line in sys.stdin:
         result = {'data': [{'id': 'test-model', 'model': 'test-model', 'displayName': 'Test model'}]}
     elif method == 'thread/list':
         assert 'cwd' not in params, 'History must span all working folders'
-        stored = [metadata(t) for t in threads.values() if t.get('turns') and t.get('source', 'vscode') in params.get('sourceKinds', ['cli', 'vscode'])]
+        stored = [metadata(t) for t in threads.values() if bool(t.get('archived', False)) == bool(params.get('archived', False)) and t.get('turns') and t.get('source', 'vscode') in params.get('sourceKinds', ['cli', 'vscode'])]
         stored.sort(key=lambda t: t.get('updatedAt', 0), reverse=True)
         offset = int(params.get('cursor', 'page:0').split(':')[1])
         limit = params.get('limit', 50)

@@ -762,3 +762,53 @@ async fn push_and_settings_endpoints_require_human_cookie_and_csrf() {
     assert!(source.contains("notificationclick") && source.contains("showNotification"));
     assert!(!source.contains("caches.open"));
 }
+
+#[tokio::test]
+async fn reminders_and_search_require_authentication_and_human_csrf() {
+    let s = Server::new().await;
+    let cookie = s.login().await;
+    for op in [
+        "create_reminder",
+        "list_reminders",
+        "cancel_reminder",
+        "search",
+        "agent_activity",
+        "read_notification",
+    ] {
+        let url = format!("{}/api/board/{op}", s.url);
+        let body =
+            json!({"message":"Private","dueAt":agentmanager::now()+30,"query":"private","id":1});
+        assert_eq!(
+            s.client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            s.client
+                .post(&url)
+                .header("Cookie", &cookie)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let response = s
+        .client
+        .post(format!("{}/api/board/create_reminder", s.url))
+        .header("Cookie", &cookie)
+        .header("Origin", &s.url)
+        .header("X-Agentmanager", "1")
+        .json(&json!({"message":"Private","dueAt":agentmanager::now()+30}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}

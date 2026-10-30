@@ -42,6 +42,11 @@ export async function api(path, body, method, signal) {
 }
 const reads = new Set([
   "overview",
+  "agent_activity",
+  "search",
+  "list_reminders",
+  "read_reminder",
+  "read_notification",
   "list_topics",
   "read_topic",
   "list_agents",

@@ -407,7 +407,7 @@ async fn workers(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<J
     Ok(Json(json!(records.into_iter().map(|r|{
         let peer=peers.get(&r.id);
         let version=peer.map(|p|p.version.clone()).unwrap_or(r.version);
-        json!({"id":r.id,"name":r.name,"online":peer.is_some(),"createdAt":r.created_at,"workerVersion":version})
+        json!({"id":r.id,"name":r.name,"online":peer.is_some(),"createdAt":r.created_at,"workerVersion":version,"capabilities":peer.map(|p|p.capabilities.clone()).unwrap_or_default()})
     }).collect::<Vec<_>>())))
 }
 async fn enrollment(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {

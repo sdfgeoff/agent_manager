@@ -24,6 +24,21 @@ export default function Sessions({ params }) {
     app.workers.find((w) => w.online)?.id ||
     app.workers[0]?.id;
   const threadId = params.get("thread");
+  const searchText = params.get("search") || "";
+  const [searchPages, setSearchPages] = useState(0);
+  const [searchingHistory, setSearchingHistory] = useState(false);
+  const matched = itemsMatch;
+  function itemsMatch(item) {
+    if (!searchText || !["userMessage", "agentMessage"].includes(item.type))
+      return false;
+    const text = (
+      item.text || (item.content || []).map((c) => c.text || "").join(" ")
+    ).toLowerCase();
+    return searchText
+      .toLowerCase()
+      .split(/\s+/)
+      .every((word) => text.includes(word));
+  }
   const selectedWorker = app.workers.find((w) => w.id === worker);
   const agent = app.agents.find(
     (a) => a.worker === worker && a.thread === threadId,
@@ -174,7 +189,7 @@ export default function Sessions({ params }) {
       for (const message of buffer.current) incoming(message);
       buffer.current = [];
       await loadStatus();
-      scroll(initial);
+      if (!searchText) scroll(initial);
     } catch (e) {
       if (epoch.current === current) {
         syncing.current = false;
@@ -186,6 +201,8 @@ export default function Sessions({ params }) {
   }
   useEffect(() => {
     epoch.current++;
+    setSearchPages(0);
+    setSearchingHistory(false);
     setThread(null);
     setItems([]);
     setOlder(null);
@@ -312,7 +329,28 @@ export default function Sessions({ params }) {
       setError(e);
     }
   }
-  async function oldMessages() {
+  const searchHit = items.find(matched);
+  useEffect(() => {
+    if (!searchText || loading || searchingHistory || !thread) return;
+    if (searchHit) {
+      document
+        .getElementById("session-item-" + searchHit.id)
+        ?.scrollIntoView({ block: "center" });
+    } else if (older && searchPages < 10) {
+      setSearchPages((n) => n + 1);
+      oldMessages(true);
+    }
+  }, [
+    searchText,
+    loading,
+    thread?.id,
+    older,
+    searchHit?.id,
+    searchingHistory,
+    searchPages,
+  ]);
+  async function oldMessages(searching = false) {
+    if (searching) setSearchingHistory(true);
     const current = epoch.current;
     const node = scroller.current;
     const height = node?.scrollHeight;
@@ -336,10 +374,13 @@ export default function Sessions({ params }) {
       ]);
       setOlder(page.nextCursor);
       requestAnimationFrame(() => {
-        if (node && height) node.scrollTop += node.scrollHeight - height;
+        if (!searching && node && height)
+          node.scrollTop += node.scrollHeight - height;
       });
     } catch (e) {
       setError(e);
+    } finally {
+      if (current === epoch.current && searching) setSearchingHistory(false);
     }
   }
   return (
@@ -521,15 +562,37 @@ export default function Sessions({ params }) {
           </div>
         ) : (
           <>
+            {searchText && (
+              <div className="session-search-notice">
+                Search: <strong>{searchText}</strong> ·{" "}
+                {searchHit ? (
+                  "Matching message highlighted"
+                ) : searchingHistory ? (
+                  "Searching earlier messages…"
+                ) : older ? (
+                  <button onClick={() => setSearchPages(0)}>
+                    Search further back
+                  </button>
+                ) : (
+                  "No matching message in available history"
+                )}
+              </div>
+            )}
             <div className="chat-history" ref={scroller}>
               {loading && <p className="muted">Loading session…</p>}
               {older && (
-                <button className="load-more" onClick={oldMessages}>
+                <button className="load-more" onClick={() => oldMessages()}>
                   Load earlier messages
                 </button>
               )}
               {items.map((item) => (
-                <SessionItem key={item.id} item={item} />
+                <div
+                  id={"session-item-" + item.id}
+                  className={matched(item) ? "search-focus" : ""}
+                  key={item.id}
+                >
+                  <SessionItem item={item} />
+                </div>
               ))}
               {status.requests
                 ?.filter((r) => r.params?.threadId === threadId)

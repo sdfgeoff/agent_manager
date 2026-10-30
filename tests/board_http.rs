@@ -383,3 +383,81 @@ async fn offline_notifications_batch_steer_pause_and_explicit_publication_work_e
     mcp.kill().unwrap();
     mcp.wait().unwrap();
 }
+
+#[tokio::test]
+async fn scheduled_reminders_use_private_mcp_api_timer_and_paused_agent_delivery() {
+    let mut f = Fixture::new().await;
+    f.start_worker().await;
+    let a=f.op("create_agent",json!({"handle":"reminder-agent","name":"Reminder agent","worker":f.worker_id,"cwd":f.dir.path(),"persona":"Private persona","settings":{}})).await;
+    let id = a["id"].as_str().unwrap();
+    f.op("update_agent", json!({"id":id,"paused":true})).await;
+    let credential = f
+        .dir
+        .path()
+        .join("worker.sessions.agents.agent-credentials")
+        .join(format!("{id}.json"));
+    let due = agentmanager::now() + 2;
+    // Use the actual MCP stdio adapter, not a direct database insert.
+    use std::io::{BufRead, Write};
+    let mut mcp = std::process::Command::new(env!("CARGO_BIN_EXE_worker"))
+        .args(["mcp", "--credential-file", credential.to_str().unwrap()])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = mcp.stdin.take().unwrap();
+    let output = mcp.stdout.take().unwrap();
+    let response=tokio::task::spawn_blocking(move||{
+        writeln!(input,"{}",json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_reminder","arguments":{"message":"Private timed follow-up @admin","dueAt":due}}})).unwrap();
+        input.flush().unwrap();let mut line=String::new();std::io::BufReader::new(output).read_line(&mut line).unwrap();line
+    }).await.unwrap();
+    mcp.kill().unwrap();
+    mcp.wait().unwrap();
+    assert!(response.contains("\"isError\":false"), "{response}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    while f.app.store.board_pending(id).unwrap().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "Timer did not fire");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(f.calls().iter().all(|c| c["method"] != "turn/start"));
+    let human = f.app.store.board_human("admin").unwrap();
+    assert!(
+        f.app.store.board_pending(&human.id).unwrap().is_empty(),
+        "Reminder mentions must not notify others"
+    );
+    let activity = f.op("agent_activity", json!({})).await;
+    assert_eq!(activity["agents"][0]["queued"], 1);
+    assert_eq!(activity["agents"][0]["paused"], true);
+    let pending = f.app.store.board_pending(id).unwrap();
+    let agent = f.app.store.board_agent(id).unwrap();
+    let actor = agentmanager::board::Actor {
+        id: agent.id,
+        handle: agent.handle,
+        name: agent.name,
+        kind: "agent".into(),
+    };
+    f.app
+        .store
+        .board(&actor, "mark_read", &json!({"id":pending[0]["id"]}))
+        .unwrap();
+    assert_eq!(
+        f.app.store.board_pending(id).unwrap().len(),
+        1,
+        "Read state must not acknowledge delivery"
+    );
+    f.op("update_agent", json!({"id":id,"paused":false})).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(7);
+    while !f.app.store.board_pending(id).unwrap().is_empty() {
+        assert!(std::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let starts = f
+        .calls()
+        .into_iter()
+        .filter(|c| c["method"] == "turn/start")
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 1);
+    let input = starts[0]["params"]["input"][0]["text"].as_str().unwrap();
+    assert!(input.contains("Private timed follow-up") && !input.contains("Private persona"));
+    assert_eq!(f.op("list_topics", json!({})).await["data"], json!([]));
+}

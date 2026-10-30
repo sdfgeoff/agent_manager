@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS board_channels(id INTEGER PRIMARY KEY AUTOINCREMENT,n
 CREATE TABLE IF NOT EXISTS board_topics(id INTEGER PRIMARY KEY AUTOINCREMENT,channel INTEGER NOT NULL REFERENCES board_channels(id),title TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'discussion' CHECK(status IN ('discussion','working','done','archived')),assignee TEXT REFERENCES board_actors(id),author TEXT NOT NULL REFERENCES board_actors(id),created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS board_replies(id INTEGER PRIMARY KEY AUTOINCREMENT,topic INTEGER NOT NULL REFERENCES board_topics(id),author TEXT NOT NULL REFERENCES board_actors(id),body TEXT NOT NULL,created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS board_subscriptions(actor TEXT NOT NULL REFERENCES board_actors(id),kind TEXT NOT NULL CHECK(kind IN ('channel','topic')),target INTEGER NOT NULL,subscribed INTEGER NOT NULL,PRIMARY KEY(actor,kind,target));
-CREATE TABLE IF NOT EXISTS board_events(id INTEGER PRIMARY KEY AUTOINCREMENT,topic INTEGER NOT NULL REFERENCES board_topics(id),actor TEXT NOT NULL REFERENCES board_actors(id),kind TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS board_events(id INTEGER PRIMARY KEY AUTOINCREMENT,topic INTEGER REFERENCES board_topics(id),actor TEXT NOT NULL REFERENCES board_actors(id),kind TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS board_notifications(id INTEGER PRIMARY KEY AUTOINCREMENT,recipient TEXT NOT NULL REFERENCES board_actors(id),event INTEGER NOT NULL REFERENCES board_events(id),read_at INTEGER,delivered_at INTEGER,UNIQUE(recipient,event));
 CREATE INDEX IF NOT EXISTS board_notification_delivery ON board_notifications(recipient,delivered_at,id);
 CREATE INDEX IF NOT EXISTS board_topic_channel ON board_topics(channel,id);
@@ -338,6 +338,15 @@ impl Store {
             .filter(|s| !s.is_empty() && s.len() <= 100);
         if let Some(request)=request && let Some((old_op,input,result))=tx.query_row("SELECT operation,input,result FROM board_requests WHERE actor=?1 AND request=?2",params![actor.id,request],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?{ensure!(old_op==op&&serde_json::from_str::<Value>(&input)?==*p,"Request id reused with different input");return Ok(serde_json::from_str(&result)?);}
         let result = match op {
+            "create_reminder" | "update_reminder" | "cancel_reminder" | "list_reminders"
+            | "read_reminder" => crate::reminders::operation(&tx, actor, op, p)?,
+            "search" => crate::search::board_search(&tx, actor, p)?,
+            "agent_activity" => {
+                ensure!(actor.kind == "human", "Human account required");
+                let agents=tx.prepare("SELECT a.id,a.worker,a.thread,a.paused,a.error,(SELECT COUNT(*) FROM board_notifications n WHERE n.recipient=a.id AND n.delivered_at IS NULL) FROM board_agents a")?.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"worker":r.get::<_,String>(1)?,"thread":r.get::<_,String>(2)?,"paused":r.get::<_,bool>(3)?,"error":r.get::<_,Option<String>>(4)?,"queued":r.get::<_,i64>(5)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                let topics=tx.prepare("SELECT id,title,channel,status,assignee FROM board_topics WHERE assignee IS NOT NULL AND status IN ('discussion','working') ORDER BY updated_at DESC,id DESC")?.query_map([],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"channel":r.get::<_,i64>(2)?,"status":r.get::<_,String>(3)?,"assignee":r.get::<_,String>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                json!({"agents":agents,"topics":topics})
+            }
             "agent_subscriptions" => {
                 ensure!(actor.kind == "human", "Human account required");
                 let id = string(p, "id", 100)?;
@@ -350,7 +359,7 @@ impl Store {
                     .query_map([],|r|{let mut value=json!(actor_row(r)?);value["active"]=json!(r.get::<_,bool>(4)?);Ok(value)})?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 let channels=tx.prepare("SELECT c.id,c.name,c.description,COALESCE(s.subscribed,0) FROM board_channels c LEFT JOIN board_subscriptions s ON s.kind='channel' AND s.target=c.id AND s.actor=?1 ORDER BY c.name")?.query_map([&actor.id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"name":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,"subscribed":r.get::<_,bool>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                json!({"me":actor,"people":people,"channels":channels,"statuses":STATUSES})
+                json!({"me":actor,"people":people,"channels":channels,"statuses":STATUSES,"serverTime":now()})
             }
             "create_channel" => {
                 let name = handle(string(p, "name", 40)?)?;
@@ -378,7 +387,19 @@ impl Store {
             "read_topic" => {
                 let id = number(p, "topic")?;
                 let mut t = topic(&tx, id)?;
-                let before = p["before"].as_i64().unwrap_or(i64::MAX);
+                let before = if let Some(reply) = p["reply"].as_i64() {
+                    ensure!(
+                        tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM board_replies WHERE id=?1 AND topic=?2)",
+                            params![reply, id],
+                            |r| r.get::<_, bool>(0)
+                        )?,
+                        "Reply not found"
+                    );
+                    reply.saturating_add(1)
+                } else {
+                    p["before"].as_i64().unwrap_or(i64::MAX)
+                };
                 let rows=tx.prepare("SELECT id,author,body,created_at FROM board_replies WHERE topic=?1 AND id<?2 ORDER BY id DESC LIMIT 101")?.query_map(params![id,before],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"author":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?,"createdAt":r.get::<_,i64>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 let more = rows.len() > 100;
                 let mut rows = rows.into_iter().take(100).collect::<Vec<_>>();
@@ -508,6 +529,11 @@ impl Store {
                 );
                 subscribe(&tx, recipient, kind, target, yes)?;
                 json!({"subscribed":yes})
+            }
+            "read_notification" => {
+                let id = number(p, "id")?;
+                let (raw,created,read):(String,i64,Option<i64>)=tx.query_row("SELECT e.payload,e.created_at,n.read_at FROM board_notifications n JOIN board_events e ON e.id=n.event WHERE n.id=?1 AND n.recipient=?2",params![id,actor.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.context("Notification not found")?;
+                json!({"id":id,"event":serde_json::from_str::<Value>(&raw)?,"createdAt":created,"read":read.is_some()})
             }
             "list_notifications" => {
                 json!({"data":notifications(&tx,&actor.id,false,p["before"].as_i64().unwrap_or(0))?})
