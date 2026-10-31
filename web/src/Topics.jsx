@@ -11,7 +11,7 @@ import {
   MessageSquare,
   ArrowLeft,
 } from "lucide-react";
-import { board, href, navigate } from "./api";
+import { board, href, navigate, route, authGuard } from "./api";
 import { useApp } from "./context";
 import {
   Composer,
@@ -346,12 +346,13 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
   const [title, setTitle] = useState("");
   const sequence = useRef(0);
   const scroll = useRef(null);
-  async function load() {
+  const sentReply = useRef(null);
+  async function load(latest = false) {
     const version = ++sequence.current;
     try {
       const t = await board("read_topic", {
         topic: id,
-        ...(reply ? { reply: Number(reply) } : {}),
+        ...(!latest && reply ? { reply: Number(reply) } : {}),
       });
       if (version === sequence.current) {
         setTopic(t);
@@ -371,6 +372,17 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
         .getElementById("reply-" + reply)
         ?.scrollIntoView({ block: "center" });
   }, [reply, topic?.id]);
+  useEffect(() => {
+    if (
+      sentReply.current &&
+      topic?.replies.some((r) => r.id === sentReply.current)
+    ) {
+      document
+        .getElementById("reply-" + sentReply.current)
+        ?.scrollIntoView({ block: "nearest" });
+      sentReply.current = null;
+    }
+  }, [topic]);
   async function update(p) {
     try {
       await board("update_topic", { topic: id, ...p });
@@ -491,8 +503,13 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
           </article>
           {reply && (
             <p className="notice">
-              Showing replies up to this search result.{" "}
-              <a href={location.hash.replace(/&reply=\d+/, "")}>
+              Showing replies up to the linked reply.{" "}
+              <a
+                href={href("topics", {
+                  ...Object.fromEntries(route().params),
+                  reply: null,
+                })}
+              >
                 Show latest replies
               </a>
             </p>
@@ -531,8 +548,23 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
             label="Reply"
             buttonText="Reply"
             onSubmit={async (data) => {
-              await board("post_reply", { ...data, topic: id });
-              await load();
+              const stillSignedIn = authGuard();
+              const posted = await board("post_reply", { ...data, topic: id });
+              stillSignedIn();
+              const current = route();
+              if (
+                current.page === "topics" &&
+                Number(current.params.get("topic")) === id
+              ) {
+                // Deep links cap the loaded history at their reply. After sending,
+                // both the URL and this in-flight refresh must request latest replies.
+                sentReply.current = posted.id;
+                navigate("topics", {
+                  ...Object.fromEntries(current.params),
+                  reply: null,
+                });
+                await load(true);
+              }
               app.changed();
             }}
           />
