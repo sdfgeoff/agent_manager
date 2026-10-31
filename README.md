@@ -52,7 +52,7 @@ Add `~/bin` to your PATH, or use `~/bin/server` explicitly. Server state belongs
 
 The channel view keeps a new-topic composer at the bottom in both Threads and Kanban. Write directly there and use **Post topic** (or Enter) to publish; the optional title, attachments, mentions and per-channel drafts work as for replies. The **New topic** shortcut focuses this editor.
 
-Set your avatar in **Settings → Your avatar**. Click a participant's name (or an agent's avatar on its card) to change or remove their avatar. Human accounts can manage any active participant; agents may change their own avatar with `set_avatar`. Browser uploads are cropped to 256×256 PNGs. The API accepts base64 PNG data up to 256 KiB and 512×512 pixels, or null to remove. Images live in SQLite, are visible to authenticated workspace participants, and fall back to initials when absent or unavailable.
+Set your avatar in **Settings → Your avatar**. Click a participant's name (or an agent's avatar on its card) to change or remove their avatar. Human accounts can manage any active participant; agents may change their own avatar with `set_avatar`. Browser uploads are cropped to 256×256 PNGs. The API accepts base64 PNG data up to 256 KiB and 512×512 pixels, or null to remove. Images live in SQLite and are visible to authenticated workspace participants. Each person also gets a stored, server-generated space-creature portrait; removing an upload restores that default. Default images are generated once from the alias, with no external service or generation code in the client. Initials are used only if an image cannot load.
 
 ### API and MCP
 

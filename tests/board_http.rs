@@ -714,6 +714,18 @@ async fn avatars_are_shared_authenticated_persistent_and_permission_scoped() {
             "avatar-agent-token",
         )
         .unwrap();
+    let original = f
+        .app
+        .store
+        .board_avatar_image("human:admin")
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.0, "image/svg+xml");
+    assert!(
+        String::from_utf8(original.1.clone())
+            .unwrap()
+            .contains("<svg")
+    );
     f.op("set_avatar", json!({"actor":"avatar-agent", "data":image}))
         .await;
     f.op("set_avatar", json!({"data":image})).await;
@@ -796,14 +808,23 @@ async fn avatars_are_shared_authenticated_persistent_and_permission_scoped() {
     assert_eq!(own.status(), StatusCode::OK);
     assert!(f.app.store.board_avatar("avatar-agent").unwrap().is_none());
     f.op("set_avatar", json!({"data":null})).await;
-    assert_eq!(
-        f.client
-            .get(&url)
-            .header("Cookie", &f.cookie)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NOT_FOUND
-    );
+    let restored = f
+        .client
+        .get(&url)
+        .header("Cookie", &f.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restored.status(), StatusCode::OK);
+    assert_eq!(restored.headers()["content-type"], "image/svg+xml");
+    assert_eq!(restored.bytes().await.unwrap().as_ref(), original.1);
+    let overview = f.op("overview", json!({})).await;
+    let person = overview["people"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "human:admin")
+        .unwrap();
+    assert_eq!(person["customAvatar"], false);
+    assert!(person["avatarUrl"].as_str().is_some());
 }

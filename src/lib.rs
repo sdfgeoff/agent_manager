@@ -1,4 +1,5 @@
 pub mod agent_runtime;
+mod avatars;
 pub mod board;
 pub mod board_api;
 pub mod catalog;

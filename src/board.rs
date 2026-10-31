@@ -31,6 +31,7 @@ pub struct Agent {
 pub fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch("BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS board_actors(id TEXT PRIMARY KEY,handle TEXT NOT NULL UNIQUE,name TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('human','agent')));
+CREATE TABLE IF NOT EXISTS board_default_avatars(actor TEXT PRIMARY KEY REFERENCES board_actors(id) ON DELETE CASCADE,data BLOB NOT NULL,revision TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS board_avatars(actor TEXT PRIMARY KEY REFERENCES board_actors(id) ON DELETE CASCADE,data BLOB NOT NULL,revision TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS board_agents(id TEXT PRIMARY KEY REFERENCES board_actors(id),worker TEXT NOT NULL,thread TEXT NOT NULL,persona TEXT NOT NULL,settings TEXT NOT NULL,paused INTEGER NOT NULL DEFAULT 0,token_hash TEXT NOT NULL UNIQUE,error TEXT,UNIQUE(worker,thread));
 CREATE TABLE IF NOT EXISTS board_channels(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,description TEXT NOT NULL DEFAULT '');
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS board_attachments(id TEXT PRIMARY KEY,owner TEXT NOT 
 CREATE TABLE IF NOT EXISTS board_requests(actor TEXT NOT NULL,request TEXT NOT NULL,operation TEXT NOT NULL,input TEXT NOT NULL,result TEXT NOT NULL,PRIMARY KEY(actor,request));
 INSERT OR IGNORE INTO board_channels(name,description) VALUES('general','Shared conversations and work');
 COMMIT;")?;
+    crate::avatars::ensure_defaults(db)?;
     Ok(())
 }
 fn actor_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Actor> {
@@ -181,6 +183,7 @@ impl Store {
     pub fn board_human(&self, username: &str) -> Result<Actor> {
         let db = self.0.lock().unwrap();
         db.execute("INSERT OR IGNORE INTO board_actors SELECT 'human:'||username,username,username,'human' FROM users",[])?;
+        crate::avatars::ensure_defaults(&db)?;
         Ok(db.query_row(
             "SELECT id,handle,name,kind FROM board_actors WHERE id=?1",
             [format!("human:{username}")],
@@ -266,6 +269,7 @@ impl Store {
         )?;
         tx.execute("INSERT INTO board_agents(id,worker,thread,persona,settings,paused,token_hash) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![a.id,a.worker,a.thread,a.persona,a.settings.to_string(),a.paused,security::digest(token)])?;
         tx.execute("DELETE FROM board_agent_registrations WHERE id=?1", [&a.id])?;
+        crate::avatars::ensure_defaults(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -354,6 +358,12 @@ impl Store {
                 r.get(0)
             })
             .optional()?)
+    }
+    pub fn board_avatar_image(&self, id: &str) -> Result<Option<(String, Vec<u8>)>> {
+        Ok(self.0.lock().unwrap().query_row(
+            "SELECT mime,data FROM (SELECT 0 priority,'image/png' mime,data FROM board_avatars WHERE actor=?1 UNION ALL SELECT 1,'image/svg+xml',data FROM board_default_avatars WHERE actor=?1) ORDER BY priority LIMIT 1",
+            [id], |r|Ok((r.get(0)?,r.get(1)?)),
+        ).optional()?)
     }
     pub fn board(&self, actor: &Actor, op: &str, p: &Value) -> Result<Value> {
         ensure!(p.is_object(), "Request must be an object");
@@ -444,8 +454,16 @@ impl Store {
             }
             "overview" => {
                 let people = tx
-                    .prepare("SELECT a.id,a.handle,a.name,a.kind,(a.kind='agent' OR EXISTS(SELECT 1 FROM users u WHERE a.id='human:'||u.username)),v.revision FROM board_actors a LEFT JOIN board_avatars v ON v.actor=a.id ORDER BY kind,name")?
-                    .query_map([],|r|{let mut value=json!(actor_row(r)?);value["active"]=json!(r.get::<_,bool>(4)?);value["avatarUrl"]=json!(r.get::<_,Option<String>>(5)?.map(|v|format!("/api/avatars/{}?v={v}",r.get::<_,String>(0).unwrap())));Ok(value)})?
+                    .prepare("SELECT a.id,a.handle,a.name,a.kind,(a.kind='agent' OR EXISTS(SELECT 1 FROM users u WHERE a.id='human:'||u.username)),COALESCE(v.revision,d.revision),v.actor IS NOT NULL FROM board_actors a LEFT JOIN board_avatars v ON v.actor=a.id LEFT JOIN board_default_avatars d ON d.actor=a.id ORDER BY kind,name")?
+                    .query_map([], |r| {
+                        let person = actor_row(r)?;
+                        let image = r.get::<_,Option<String>>(5)?.map(|revision|format!("/api/avatars/{}?v={revision}",person.id));
+                        let mut value = json!(person);
+                        value["active"] = json!(r.get::<_,bool>(4)?);
+                        value["avatarUrl"] = json!(image);
+                        value["customAvatar"] = json!(r.get::<_,bool>(6)?);
+                        Ok(value)
+                    })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 let channels=tx.prepare("SELECT c.id,c.name,c.description,COALESCE(s.subscribed,0) FROM board_channels c LEFT JOIN board_subscriptions s ON s.kind='channel' AND s.target=c.id AND s.actor=?1 ORDER BY c.name")?.query_map([&actor.id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"name":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,"subscribed":r.get::<_,bool>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 json!({"me":actor,"people":people,"channels":channels,"statuses":STATUSES,"serverTime":now()})

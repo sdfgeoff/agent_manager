@@ -122,7 +122,7 @@ export function AvatarEditor({ person }) {
       guard();
       await board("set_avatar", { actor: person.id, data });
       await app.refresh();
-      setNotice(file ? "Avatar updated." : "Avatar removed.");
+      setNotice(file ? "Avatar updated." : "Default avatar restored.");
     } catch (e) {
       setError(e);
     } finally {
@@ -151,7 +151,7 @@ export function AvatarEditor({ person }) {
         >
           Change avatar
         </BusyButton>
-        {person.avatarUrl && (
+        {person.customAvatar && (
           <button type="button" disabled={busy} onClick={() => save(null)}>
             Remove avatar
           </button>

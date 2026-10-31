@@ -356,13 +356,13 @@ async fn avatar(
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
     actor(&app, &headers, false)?;
-    let bytes = app
+    let (mime, bytes) = app
         .store
-        .board_avatar(&id)?
+        .board_avatar_image(&id)?
         .ok_or_else(|| rejected(StatusCode::NOT_FOUND, "Avatar not found"))?;
     Ok((
         [
-            (header::CONTENT_TYPE, "image/png"),
+            (header::CONTENT_TYPE, mime.as_str()),
             (header::CACHE_CONTROL, "private, no-store"),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],

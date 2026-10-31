@@ -72,6 +72,7 @@ impl Store {
             "INSERT OR IGNORE INTO board_actors VALUES(?1,?2,?2,'human')",
             params![format!("human:{username}"), username],
         )?;
+        crate::avatars::ensure_defaults(&tx)?;
         tx.execute(
             "DELETE FROM push_subscriptions WHERE username=?1",
             [&username],
@@ -105,6 +106,7 @@ impl Store {
             "INSERT OR IGNORE INTO board_actors VALUES(?1,?2,?2,'human')",
             params![format!("human:{username}"), username],
         )?;
+        crate::avatars::ensure_defaults(&tx)?;
         tx.commit()?;
         Ok(())
     }
