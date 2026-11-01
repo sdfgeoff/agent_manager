@@ -25,6 +25,7 @@ export default function Topics({ params }) {
   const app = useApp();
   const channel = Number(params.get("channel")) || app.channels[0]?.id;
   const view = params.get("view") === "kanban" ? "kanban" : "threads";
+  const sort = params.get("sort") === "created" ? "created" : "latest";
   const search = params.get("search") || "";
   const status = params.get("status") || "";
   const assignee = params.get("assignee") || "";
@@ -41,6 +42,7 @@ export default function Topics({ params }) {
   const channelInfo = app.channels.find((c) => c.id === channel);
   const current = {
     channel,
+    sort,
     view,
     search,
     status,
@@ -74,6 +76,7 @@ export default function Topics({ params }) {
     try {
       const result = await board("list_topics", {
         channel,
+        sort,
         search,
         ...(status ? { status } : {}),
         ...(more && cursor ? { before: cursor } : {}),
@@ -93,7 +96,7 @@ export default function Topics({ params }) {
     return () => {
       generation.current++;
     };
-  }, [channel, search, status, app.revision]);
+  }, [channel, sort, search, status, app.revision]);
   const visible = data.filter(
     (t) =>
       (showArchived || t.status !== "archived") &&
@@ -141,6 +144,25 @@ export default function Topics({ params }) {
             <span>Unassigned</span>
           )}
           <time>{new Date(t.createdAt * 1000).toLocaleDateString()}</time>
+        </div>
+        <div className="card-meta">
+          <span>
+            Latest post by{" "}
+            {app.people.find((p) => p.id === (t.latestPost?.author || t.author))
+              ?.name ||
+              t.latestPost?.author ||
+              t.author}
+            {" at "}
+            <time
+              dateTime={new Date(
+                (t.latestPost?.createdAt || t.createdAt) * 1000,
+              ).toISOString()}
+            >
+              {new Date(
+                (t.latestPost?.createdAt || t.createdAt) * 1000,
+              ).toLocaleString()}
+            </time>
+          </span>
         </div>
       </a>
     );
@@ -211,6 +233,14 @@ export default function Topics({ params }) {
             </div>
           </div>
           <div className="filters">
+            <select
+              aria-label="Sort topics"
+              value={sort}
+              onChange={(e) => patch({ sort: e.target.value })}
+            >
+              <option value="latest">Latest post</option>
+              <option value="created">Newest topic</option>
+            </select>
             <select
               aria-label="Filter by status"
               value={status}

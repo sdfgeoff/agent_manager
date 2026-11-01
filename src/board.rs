@@ -98,7 +98,16 @@ fn handle(v: &str) -> Result<String> {
     Ok(v)
 }
 fn topic(db: &Connection, id: i64) -> Result<Value> {
-    db.query_row("SELECT t.id,t.channel,t.title,t.body,t.status,t.assignee,t.author,t.created_at,t.updated_at,c.name FROM board_topics t JOIN board_channels c ON c.id=t.channel WHERE t.id=?1",[id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"channel":r.get::<_,i64>(1)?,"title":r.get::<_,String>(2)?,"body":r.get::<_,String>(3)?,"status":r.get::<_,String>(4)?,"assignee":r.get::<_,Option<String>>(5)?,"author":r.get::<_,String>(6)?,"createdAt":r.get::<_,i64>(7)?,"updatedAt":r.get::<_,i64>(8)?,"channelName":r.get::<_,String>(9)?}))).optional()?.context("Topic not found")
+    let mut value = db.query_row("SELECT t.id,t.channel,t.title,t.body,t.status,t.assignee,t.author,t.created_at,t.updated_at,c.name FROM board_topics t JOIN board_channels c ON c.id=t.channel WHERE t.id=?1",[id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"channel":r.get::<_,i64>(1)?,"title":r.get::<_,String>(2)?,"body":r.get::<_,String>(3)?,"status":r.get::<_,String>(4)?,"assignee":r.get::<_,Option<String>>(5)?,"author":r.get::<_,String>(6)?,"createdAt":r.get::<_,i64>(7)?,"updatedAt":r.get::<_,i64>(8)?,"channelName":r.get::<_,String>(9)?}))).optional()?.context("Topic not found")?;
+    value["latestPost"] = db
+        .query_row(
+            "SELECT author,created_at FROM board_replies WHERE topic=?1 ORDER BY id DESC LIMIT 1",
+            [id],
+            |r| Ok(json!({"author":r.get::<_,String>(0)?,"createdAt":r.get::<_,i64>(1)?})),
+        )
+        .optional()?
+        .unwrap_or_else(|| json!({"author":value["author"],"createdAt":value["createdAt"]}));
+    Ok(value)
 }
 fn subscribe(tx: &Transaction<'_>, actor: &str, kind: &str, target: i64, yes: bool) -> Result<()> {
     tx.execute("INSERT INTO board_subscriptions VALUES(?1,?2,?3,?4) ON CONFLICT(actor,kind,target) DO UPDATE SET subscribed=excluded.subscribed",params![actor,kind,target,yes])?;
@@ -484,7 +493,21 @@ impl Store {
                 let status = p["status"].as_str();
                 let search = p["search"].as_str().unwrap_or("");
                 ensure!(search.len() <= 200, "Search is too long");
-                let ids=tx.prepare("SELECT id FROM board_topics WHERE (?1 IS NULL OR channel=?1) AND id<?2 AND (?3 IS NULL OR status=?3) AND (?4='' OR instr(lower(title||' '||body),lower(?4))>0 OR EXISTS(SELECT 1 FROM board_replies r WHERE r.topic=board_topics.id AND instr(lower(r.body),lower(?4))>0)) ORDER BY id DESC LIMIT 51")?.query_map(params![channel,before,status,search],|r|r.get::<_,i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                let sort = p["sort"].as_str().unwrap_or("created");
+                ensure!(matches!(sort, "created" | "latest"), "Invalid topic sort");
+                // Keep the topic-id cursor compatible with existing clients. For latest-post
+                // ordering, resolve it to the same (post timestamp, topic id) ordering key.
+                let ids=tx.prepare("WITH ranked AS (
+                    SELECT t.*, CASE WHEN ?5='latest' THEN COALESCE(
+                        (SELECT created_at FROM board_replies r WHERE r.topic=t.id ORDER BY id DESC LIMIT 1),
+                        t.created_at) ELSE t.id END AS sort_key FROM board_topics t
+                    )
+                    SELECT id FROM ranked WHERE (?1 IS NULL OR channel=?1)
+                    AND (sort_key,id)<(COALESCE((SELECT sort_key FROM ranked WHERE id=?2),9223372036854775807),?2)
+                    AND (?3 IS NULL OR status=?3)
+                    AND (?4='' OR instr(lower(title||' '||body),lower(?4))>0 OR EXISTS(SELECT 1 FROM board_replies r WHERE r.topic=ranked.id AND instr(lower(r.body),lower(?4))>0))
+                    ORDER BY sort_key DESC,id DESC LIMIT 51")?.query_map(params![channel,before,status,search,sort],|r|r.get::<_,i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+
                 let mut data = Vec::new();
                 for id in ids.iter().take(50) {
                     data.push(topic(&tx, *id)?);
@@ -1022,6 +1045,93 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn latest_post_sort_paginates_and_ignores_metadata_updates() {
+        let (_dir, s, a, b) = setup();
+        for i in 0..55 {
+            s.board(
+                &a,
+                "create_topic",
+                &json!({"channel":1,"body":format!("Topic {i}")}),
+            )
+            .unwrap();
+        }
+        // Explicit timestamps exercise ties and ensure metadata updates cannot bump topics.
+        s.0.lock()
+            .unwrap()
+            .execute("UPDATE board_topics SET created_at=100,updated_at=9999", [])
+            .unwrap();
+        s.board(
+            &b,
+            "post_reply",
+            &json!({"topic":1,"body":"Newest conversation"}),
+        )
+        .unwrap();
+        s.0.lock()
+            .unwrap()
+            .execute("UPDATE board_replies SET created_at=200 WHERE topic=1", [])
+            .unwrap();
+        s.board(&a, "update_topic", &json!({"topic":2,"status":"working"}))
+            .unwrap();
+        let first = s
+            .board(&a, "list_topics", &json!({"sort":"latest"}))
+            .unwrap();
+        assert_eq!(first["data"][0]["id"], 1);
+        assert_eq!(
+            first["data"][0]["latestPost"],
+            json!({"author":b.id,"createdAt":200})
+        );
+        assert_eq!(first["data"][1]["id"], 55);
+        assert_eq!(
+            first["data"][1]["latestPost"],
+            json!({"author":a.id,"createdAt":100})
+        );
+        let second = s
+            .board(
+                &a,
+                "list_topics",
+                &json!({"sort":"latest","before":first["nextCursor"]}),
+            )
+            .unwrap();
+        let ids: Vec<i64> = first["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second["data"].as_array().unwrap())
+            .map(|v| v["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 55);
+        assert_eq!(
+            ids.iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            55
+        );
+        assert_eq!(ids.last(), Some(&2));
+        let created = s
+            .board(&a, "list_topics", &json!({"sort":"created"}))
+            .unwrap();
+        assert_eq!(created["data"][0]["id"], 55);
+        assert_eq!(
+            s.board(&a, "list_topics", &json!({})).unwrap()["data"],
+            created["data"]
+        );
+        assert!(
+            s.board(&a, "list_topics", &json!({"sort":"invalid"}))
+                .is_err()
+        );
+        let filtered = s
+            .board(
+                &a,
+                "list_topics",
+                &json!({"sort":"latest","search":"Newest conversation"}),
+            )
+            .unwrap();
+        assert_eq!(filtered["data"].as_array().unwrap().len(), 1);
+        assert_eq!(filtered["data"][0]["id"], 1);
+    }
+
     #[test]
     fn topic_and_reply_pagination_does_not_lose_hidden_or_older_work() {
         let (_dir, s, a, _) = setup();
