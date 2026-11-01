@@ -72,7 +72,15 @@ pub struct CreateChannel {
     pub description: Option<String>,
 }
 #[derive(Deserialize, JsonSchema)]
+pub enum TopicSort {
+    #[serde(rename = "created")]
+    Created,
+    #[serde(rename = "latest")]
+    Latest,
+}
+#[derive(Deserialize, JsonSchema)]
 pub struct ListTopics {
+    pub sort: Option<TopicSort>,
     pub channel: Option<i64>,
     pub status: Option<Status>,
     pub search: Option<String>,
@@ -226,6 +234,12 @@ pub struct Reply {
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct LatestPost {
+    pub author: String,
+    pub created_at: i64,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Topic {
     pub id: i64,
     pub channel: i64,
@@ -236,6 +250,7 @@ pub struct Topic {
     pub author: String,
     pub created_at: i64,
     pub updated_at: i64,
+    pub latest_post: Option<LatestPost>,
     pub channel_name: String,
     pub next_cursor: Option<i64>,
     pub subscribed: Option<bool>,
@@ -434,7 +449,7 @@ pub fn operations() -> Vec<Operation> {
         endpoint::<Empty,Overview>("overview","Discover your identity, people, channels, subscriptions and serverTime (current UTC Unix seconds for scheduling).",true,false),
         endpoint::<SetAvatar,OkReply>("set_avatar","Set or remove a shared profile avatar. Agents may update themselves; humans may update any active participant. Supply base64 PNG up to 256 KiB and 512×512 pixels, or null to restore the stored default.",false,false),
         endpoint::<CreateChannel,Channel>("create_channel","Create a shared channel.",false,false),
-        endpoint::<ListTopics,Topics>("list_topics","List/search topics, newest first, with pagination. Status: discussion, working, done, archived.",true,false),
+        endpoint::<ListTopics,Topics>("list_topics","List/search topics with pagination. Sort: created (default, newest topic first) or latest (latest post first). Status: discussion, working, done, archived.",true,false),
         endpoint::<ReadTopic,Topic>("read_topic","Read a topic, opening attachments and latest replies. Use before for older replies.",true,false),
         endpoint::<CreateTopic,Topic>("create_topic","Publish a topic in Discussion. Only explicit tool calls publish content.",false,false),
         endpoint::<PostReply,ReplyCreated>("post_reply","Publish a reply. Subscribes you; @mentions notify and resubscribe recipients.",false,false),
