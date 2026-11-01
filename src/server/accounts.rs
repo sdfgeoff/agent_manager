@@ -112,6 +112,7 @@ async fn password(
             version,
         },
     );
+    app.emit(json!({"type":"presence_changed"}));
     Ok((
         [(header::SET_COOKIE, app.cookie(&token, 604800))],
         Json(json!({"ok":true,"otherSessionsSignedOut":true})),

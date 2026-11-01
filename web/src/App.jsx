@@ -34,6 +34,7 @@ import SettingsPage, { revokeLocalPush } from "./Settings";
 import Inbox from "./Inbox";
 import Activity from "./Activity";
 import Search from "./Search";
+import { usePresence, presenceLabels } from "./presence";
 export default function App() {
   const [me, setMe] = useState(undefined);
   const [overview, setOverview] = useState({ people: [], channels: [] });
@@ -48,6 +49,7 @@ export default function App() {
   const [creatingChannel, setCreatingChannel] = useState(false);
   const [person, setPerson] = useState(null);
   const [authEpoch, setAuthEpoch] = useState(0);
+  const presence = usePresence(me?.username, authEpoch + ":" + connectionEpoch);
   const drafts = useRef(new Map());
   const lastTopics = useRef({});
   const menuTrigger = useRef(null);
@@ -224,6 +226,7 @@ export default function App() {
     channels: overview.channels,
     agents,
     workers,
+    presence,
     revision,
     refresh,
     changed,
@@ -400,6 +403,14 @@ export default function App() {
                 <Avatar person={viewingPerson} />
               )}
               <h3>@{viewingPerson.handle}</h3>
+              <p>
+                {
+                  presenceLabels[
+                    presence[viewingPerson.id] ||
+                      (viewingPerson.kind === "agent" ? "unknown" : "offline")
+                  ]
+                }
+              </p>
               <p className="muted">
                 {viewingPerson.kind === "agent"
                   ? "Agent persona"

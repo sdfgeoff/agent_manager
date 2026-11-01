@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import { X, Paperclip, Send, Check } from "lucide-react";
 import { board, friendly, authGuard } from "./api";
 import { useApp, useDraft } from "./context";
+import { presenceLabels } from "./presence";
 export function ErrorMessage({ error }) {
   return error ? (
     <p className="error" role="alert">
@@ -57,6 +58,11 @@ export function Modal({ title, children, onClose, wide = false }) {
 }
 export function Avatar({ person, small = false }) {
   const [failed, setFailed] = useState(null);
+  const app = useApp();
+  const state =
+    app?.presence?.[person?.id] ||
+    (person?.kind === "agent" ? "unknown" : "offline");
+  const label = presenceLabels[state] || presenceLabels.unknown;
   const name = person?.name || person?.handle || "?";
   const initials = name
     .trim()
@@ -67,18 +73,30 @@ export function Avatar({ person, small = false }) {
     .toUpperCase();
   return (
     <span
-      className={`avatar ${small ? "avatar-small" : ""}`}
-      aria-hidden="true"
+      className={`avatar-presence ${small ? "avatar-presence-small" : ""}`}
+      role="img"
+      aria-label={`${name}: ${label}`}
+      title={`${name}: ${label}`}
     >
-      {person?.avatarUrl && failed !== person.avatarUrl ? (
-        <img
-          src={person.avatarUrl}
-          alt=""
-          onError={() => setFailed(person.avatarUrl)}
-        />
-      ) : (
-        initials
-      )}
+      <span
+        className={`avatar ${small ? "avatar-small" : ""}`}
+        aria-hidden="true"
+      >
+        {person?.avatarUrl && failed !== person.avatarUrl ? (
+          <img
+            src={person.avatarUrl}
+            alt=""
+            onError={() => setFailed(person.avatarUrl)}
+          />
+        ) : (
+          initials
+        )}
+      </span>
+      <span className={`presence-dot presence-${state}`} aria-hidden="true">
+        {{ working: "↻", waiting: "!", paused: "Ⅱ", error: "×", unknown: "?" }[
+          state
+        ] || ""}
+      </span>
     </span>
   );
 }

@@ -19,6 +19,74 @@ struct Fixture {
     worker: Option<std::process::Child>,
     worker_id: String,
 }
+
+#[tokio::test]
+async fn shared_presence_follows_real_worker_approval_pause_and_disconnect() {
+    let mut f = Fixture::new().await;
+    f.start_worker().await;
+    let agent = f.op("create_agent",json!({"handle":"presence-agent","name":"Presence agent","worker":f.worker_id,"cwd":f.dir.path().join("workspace"),"settings":{}})).await;
+    let id = agent["id"].as_str().unwrap();
+    let thread = agent["thread"].as_str().unwrap();
+    async fn wait(f: &Fixture, id: &str, expected: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(7);
+        loop {
+            let value: Value = f
+                .client
+                .get(format!("{}/api/presence", f.url))
+                .header("Cookie", &f.cookie)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if value["actors"][id] == expected {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "wanted {expected}, got {value}"
+            );
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    }
+    async fn rpc(f: &Fixture, method: &str, params: Value) {
+        f.client
+            .post(format!("{}/api/workers/{}/rpc", f.url, f.worker_id))
+            .header("Cookie", &f.cookie)
+            .header("Origin", &f.url)
+            .header("X-Agentmanager", "1")
+            .json(&json!({"method":method,"params":params}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
+    wait(&f, id, "idle").await;
+    rpc(
+        &f,
+        "turn/start",
+        json!({"threadId":thread,"input":[{"type":"text","text":"Isolated presence check"}]}),
+    )
+    .await;
+    wait(&f, id, "waiting").await;
+    rpc(
+        &f,
+        "manager/respond",
+        json!({"requestId":100,"result":{"decision":"accept"}}),
+    )
+    .await;
+    wait(&f, id, "idle").await;
+    f.op("update_agent", json!({"id":id,"paused":true})).await;
+    wait(&f, id, "paused").await;
+    f.op("update_agent", json!({"id":id,"paused":false})).await;
+    wait(&f, id, "idle").await;
+    let mut worker = f.worker.take().unwrap();
+    worker.kill().unwrap();
+    worker.wait().unwrap();
+    wait(&f, id, "offline").await;
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         if let Some(w) = &mut self.worker {

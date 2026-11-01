@@ -1,5 +1,6 @@
 mod accounts;
 mod board_http;
+mod presence;
 mod push_http;
 mod frontend {
     include!(concat!(env!("OUT_DIR"), "/frontend.rs"));
@@ -87,6 +88,8 @@ pub struct App {
     agent_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     board_wake: tokio::sync::Notify,
     push: crate::push::Push,
+    presence: Mutex<presence::Presence>,
+    presence_wake: tokio::sync::Notify,
 }
 
 impl App {
@@ -127,6 +130,8 @@ impl App {
             agent_locks: Mutex::new(HashMap::new()),
             board_wake: tokio::sync::Notify::new(),
             push,
+            presence: Mutex::new(presence::Presence::default()),
+            presence_wake: tokio::sync::Notify::new(),
         }))
     }
     fn valid_session(&self, session: &Session) -> bool {
@@ -162,6 +167,10 @@ impl App {
         Ok(())
     }
     fn emit(&self, value: Value) {
+        if self.presence.lock().unwrap().observe(&value) {
+            self.presence_wake.notify_one();
+            let _ = self.events.send(json!({"type":"presence_changed"}));
+        }
         let _ = self.events.send(value);
     }
     fn cookie(&self, token: &str, age: u64) -> String {
@@ -201,6 +210,7 @@ fn cookie(headers: &HeaderMap) -> Option<&str> {
 pub fn router(app: Arc<App>) -> Router {
     board_http::start(&app);
     push_http::start(&app);
+    presence::start(&app);
     Router::new()
         .merge(board_http::routes())
         .route(
@@ -209,6 +219,7 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .merge(accounts::routes())
         .merge(push_http::routes())
+        .merge(presence::routes())
         .route("/", get(frontend_asset))
         .route("/assets/{*path}", get(frontend_asset))
         .route("/sw.js", get(frontend_asset))
@@ -388,6 +399,7 @@ async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Re
         app.store.push_logout(&security::digest(key))?;
         app.sessions.lock().unwrap().remove(&security::digest(key));
     }
+    app.emit(json!({"type":"presence_changed"}));
     Ok((
         [(header::SET_COOKIE, app.cookie("", 0))],
         Json(json!({"ok":true})),
@@ -679,6 +691,7 @@ async fn worker_socket(app: Arc<App>, id: String, socket: WebSocket) {
         ) {
             let _ = old.stop.send(true);
         }
+        app.presence.lock().unwrap().forget_worker(&id);
     }
     app.emit(json!({"type":"workers_changed"}));
     tracing::info!(worker=%id,"worker connected");
@@ -715,7 +728,11 @@ async fn worker_socket(app: Arc<App>, id: String, socket: WebSocket) {
                                             }
                                         }
                                     }
-                                    app.emit(json!({"type":"codex","worker":id,"message":message}));
+                                    // A replaced socket must not overwrite the new connection's presence.
+                                    let peers=app.peers.lock().unwrap();
+                                    if peers.get(&id).is_some_and(|p|p.generation==generation) {
+                                        app.emit(json!({"type":"codex","worker":id,"message":message}));
+                                    }
                                 }
                                 _=>{}
                             }
@@ -733,6 +750,7 @@ async fn worker_socket(app: Arc<App>, id: String, socket: WebSocket) {
         let mut peers = app.peers.lock().unwrap();
         if peers.get(&id).is_some_and(|p| p.generation == generation) {
             peers.remove(&id);
+            app.presence.lock().unwrap().forget_worker(&id);
         }
     }
     app.pending

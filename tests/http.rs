@@ -21,6 +21,130 @@ struct Server {
     _dir: tempfile::TempDir,
     task: tokio::task::JoinHandle<()>,
 }
+
+#[tokio::test]
+async fn presence_is_self_only_aggregates_devices_and_drops_revoked_sessions() {
+    let server = Server::new().await;
+    let endpoint = format!("{}/api/presence", server.url);
+    assert_eq!(
+        server.client.get(&endpoint).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let cookie1 = server.login().await;
+    let cookie2 = server.login().await;
+    let tab1 = uuid::Uuid::new_v4().to_string();
+    let tab2 = uuid::Uuid::new_v4().to_string();
+    let post = |cookie: &str, body: Value| {
+        server
+            .client
+            .post(&endpoint)
+            .header("Cookie", cookie)
+            .header("Origin", &server.url)
+            .header("X-Agentmanager", "1")
+            .json(&body)
+    };
+    assert_eq!(
+        server
+            .client
+            .post(&endpoint)
+            .header("Cookie", &cookie1)
+            .json(&json!({"client":tab1,"active":true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        post(
+            &cookie1,
+            json!({"client":tab1,"active":true,"username":"someone_else"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    for (cookie, tab, active) in [(&cookie1, &tab1, true), (&cookie2, &tab2, false)] {
+        assert_eq!(
+            post(cookie, json!({"client":tab,"active":active}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    let read = || {
+        server
+            .client
+            .get(&endpoint)
+            .header("Cookie", &cookie2)
+            .send()
+    };
+    let value: Value = read().await.unwrap().json().await.unwrap();
+    assert_eq!(value["actors"]["human:admin"], "active");
+    assert_eq!(
+        value.as_object().unwrap().len(),
+        1,
+        "no credentials or last-seen history exposed"
+    );
+    post(&cookie1, json!({"client":tab1,"active":false}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let value: Value = read().await.unwrap().json().await.unwrap();
+    assert_eq!(value["actors"]["human:admin"], "away");
+    post(&cookie1, json!({"client":tab1,"active":true}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    server
+        .client
+        .post(format!("{}/api/logout", server.url))
+        .header("Cookie", &cookie1)
+        .header("Origin", &server.url)
+        .header("X-Agentmanager", "1")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let value: Value = read().await.unwrap().json().await.unwrap();
+    assert_eq!(
+        value["actors"]["human:admin"], "away",
+        "other logged-in device remains present"
+    );
+    server
+        .app
+        .store
+        .set_user_password(
+            "admin",
+            &security::hash_password("changed presence password").unwrap(),
+        )
+        .unwrap();
+    let cookie3 = server.login_as("admin", "changed presence password").await;
+    let value: Value = server
+        .client
+        .get(&endpoint)
+        .header("Cookie", cookie3)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        value["actors"].get("human:admin").is_none(),
+        "old heartbeat cannot survive password rotation"
+    );
+}
 impl Drop for Server {
     fn drop(&mut self) {
         self.task.abort();

@@ -689,7 +689,7 @@ pre {
 .mention-menu button.active {
   background: #2c432e;
 }
-.mention-menu button > span:not(.avatar) {
+.mention-menu button > span:not(.avatar-presence) {
   flex: 1;
 }
 .mention-menu small {
@@ -1943,10 +1943,63 @@ mark {
   gap: 12px;
   margin-bottom: 16px;
 }
-.avatar-editor > .avatar {
+.avatar-editor > .avatar-presence > .avatar {
   width: 80px;
   height: 80px;
   font-size: 26px;
+}
+.avatar-presence {
+  display: inline-flex;
+  position: relative;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+.presence-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 15px;
+  height: 15px;
+  border: 2px solid var(--panel);
+  border-radius: 50%;
+  background: #66746c;
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+}
+.avatar-presence-small .presence-dot {
+  width: 12px;
+  height: 12px;
+  font-size: 8px;
+  right: -2px;
+  bottom: -2px;
+}
+.presence-active,
+.presence-idle {
+  background: #279b58;
+}
+.presence-away,
+.presence-waiting {
+  background: #a87316;
+}
+.presence-working {
+  background: #346fc5;
+}
+.presence-error {
+  background: #ba4242;
+}
+.presence-paused {
+  background: #8464ac;
+}
+.presence-unknown {
+  background: #626d69;
+}
+.presence-offline {
+  background: var(--panel);
+  border-color: #829089;
 }
 .avatar-editor small {
   text-align: center;

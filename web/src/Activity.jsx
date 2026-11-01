@@ -3,6 +3,7 @@ import { Activity as Pulse, RefreshCw, Terminal, Bot } from "lucide-react";
 import { board, rpc, href, events } from "./api";
 import { useApp } from "./context";
 import { ErrorMessage } from "./components";
+import { presenceLabels } from "./presence";
 
 export default function Activity() {
   const app = useApp();
@@ -68,6 +69,7 @@ export default function Activity() {
     };
   }, [app.workers.map((w) => w.id + w.online).join(","), app.revision]);
   function state(a) {
+    if (app.presence?.[a.id]) return presenceLabels[app.presence[a.id]];
     const w = app.workers.find((w) => w.id === a.worker);
     const status = workers[a.worker];
     if (a.paused) return "Paused";
