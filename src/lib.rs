@@ -13,6 +13,7 @@ pub mod security;
 pub mod server;
 pub mod store;
 pub mod updater;
+pub mod usage;
 pub mod webhook;
 pub mod worker;
 

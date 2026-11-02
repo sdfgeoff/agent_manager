@@ -129,6 +129,14 @@ for line in sys.stdin:
         send({'id': request_id, 'result': {'turn': turn}})
         event('turn/started', {'threadId': thread_id, 'turn': {'id': 'turn-1'}})
         event('item/completed', {'threadId': thread_id, 'item': user})
+        if Path(sys.argv[0]).with_suffix('.usage').exists():
+            for n in (1, 2, 2):
+                tokens = {'inputTokens': n * 100, 'cachedInputTokens': n * 40,
+                          'outputTokens': n * 20, 'reasoningOutputTokens': n * 10,
+                          'totalTokens': n * 120}
+                event('thread/tokenUsage/updated', {'threadId': thread_id,
+                      'turnId': turn['id'], 'tokenUsage': {'total': tokens, 'last': tokens}})
+
         send({'id': 100, 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread_id, 'turnId': 'turn-1', 'itemId': 'item-1', 'command': 'echo test', 'cwd': thread.get('cwd', '/projects/test'), 'reason': 'Test approval'}})
         continue
     elif method is None and request_id == 100:

@@ -206,6 +206,7 @@ pub async fn dispatch(codex: Arc<Codex>, method: &str, params: Value) -> Result<
     match method {
         "manager/search" => crate::search::sessions(codex, params).await,
         "manager/list" => codex.list_sessions(params).await,
+        "manager/usage" => codex.usage.page(&params),
         "manager/status" => Ok(status(&codex)),
         "manager/respond" => codex.respond(params).await,
         "fs/list" => list_dir(params).await,
@@ -220,7 +221,12 @@ pub async fn dispatch(codex: Arc<Codex>, method: &str, params: Value) -> Result<
 }
 fn status(codex: &Codex) -> Value {
     let mut status = codex.status();
-    status["capabilities"] = json!(["board-agents", "session-search", "server-tools"]);
+    status["capabilities"] = json!([
+        "board-agents",
+        "session-search",
+        "server-tools",
+        "token-usage"
+    ]);
     status["workerVersion"] = json!(env!("CARGO_PKG_VERSION"));
     status
 }

@@ -239,3 +239,28 @@ node --check web/app.js
 The protocol integration uses [Codex app-server](https://learn.chatgpt.com/docs/app-server) over local stdio. Tested against Codex CLI 0.164.0. Tests cover HTTP/WebSocket routing, account migration and revocation, cross-folder history, signed release notifications, and deployment rollback. They do not send paid model requests. Test state lives under `target/test-state`, not `/tmp`. Optional real Codex smoke checks run with `cargo test --test codex -- --ignored`.
 
 Use Chrome DevTools for browser checks: sign in as two different accounts in isolated contexts, confirm both see the same workers and saved conversations from different folders, and answer an approval from one browser while watching the other update. Check the login and conversation at a phone viewport and inspect the console for errors. There is no npm, Playwright, or Node build/runtime dependency for the Rust binaries.
+
+## Observed token usage
+
+The **Usage** page reads a worker-local token ledger, with totals and paginated
+turns that can be filtered by agent. Workers advertise the optional `token-usage`
+capability; older workers continue to operate but cannot supply usage records.
+Recording runs when Codex emits `thread/tokenUsage/updated`, even without a
+browser or server connection. It starts after installing the updated worker;
+publishing a server release alone does not update workers.
+
+The ledger is saved beside the worker's session catalogue, replacing its extension
+with `.usage.sqlite3`. Back it up with the catalogue and agent journal. Records
+are not replicated to the server, so the worker must be connected to read them.
+Archiving a session does not remove its usage.
+
+Counts are observed usage, not billing or topic attribution. Cached input is part
+of input, and reasoning is part of output; do not add those breakdowns again.
+Updates use differences between cumulative thread counters in a transaction,
+so duplicate snapshots and replay after restart do not count twice. When first
+observing an existing session, only its latest request is included and that turn
+is marked partial. Earlier history is not imported. Missing events, persistence
+failures or counter discontinuities can leave incomplete coverage. Decreasing
+or duplicate total counters are ignored as stale snapshots. A turn with no
+reported usage has no ledger row. Configured model metadata is descriptive,
+not proof that every request used that model, and no dollar estimate is made.

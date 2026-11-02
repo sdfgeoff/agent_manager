@@ -179,6 +179,14 @@ impl AgentRuntime {
         }
         Ok(p)
     }
+    pub fn agent_id(&self, thread: &str) -> Option<String> {
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
+            .find(|a| a.thread == thread)
+            .map(|a| a.id.clone())
+    }
     pub fn bound(&self, thread: &str) -> bool {
         self.entries
             .lock()

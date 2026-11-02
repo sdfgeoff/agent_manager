@@ -33,6 +33,7 @@ import Agents from "./Agents";
 import SettingsPage, { revokeLocalPush } from "./Settings";
 import Inbox from "./Inbox";
 import Activity from "./Activity";
+import Usage from "./Usage";
 import Search from "./Search";
 import { usePresence, presenceLabels } from "./presence";
 export default function App() {
@@ -247,6 +248,7 @@ export default function App() {
     Number(current.params.get("channel")) || overview.channels[0]?.id;
   const pages = [
     ["activity", "Activity", ActivityIcon],
+    ["usage", "Usage", ActivityIcon],
     ["search", "Search", SearchIcon],
     ["topics", "Topics", MessagesSquare],
     ["sessions", "Sessions", Terminal],
@@ -383,6 +385,7 @@ export default function App() {
           )}
           <main className={`main-view view-${page}`}>
             {page === "activity" && <Activity />}
+            {page === "usage" && <Usage params={current.params} />}
             {page === "search" && <Search params={current.params} />}
             {page === "topics" && <Topics params={current.params} />}{" "}
             {page === "sessions" && <Sessions params={current.params} />}{" "}

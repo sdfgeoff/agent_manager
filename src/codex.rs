@@ -19,6 +19,7 @@ struct PendingCall {
     thread: Option<String>,
 }
 pub struct Codex {
+    pub usage: crate::usage::Ledger,
     pub catalog: crate::catalog::Catalog,
     pub agents: crate::agent_runtime::AgentRuntime,
     pub search: Arc<Mutex<crate::search::Index>>,
@@ -47,6 +48,12 @@ impl Codex {
                 .map(|p| p.with_extension("search.sqlite3"))
                 .as_deref(),
         )?;
+        let usage = crate::usage::Ledger::open(
+            catalog_path
+                .as_ref()
+                .map(|p| p.with_extension("usage.sqlite3"))
+                .as_deref(),
+        )?;
         let catalog = crate::catalog::Catalog::open(catalog_path)?;
         let mut child = Command::new(binary)
             .args(["app-server", "--listen", "stdio://"])
@@ -64,6 +71,7 @@ impl Codex {
         let (tx, mut rx) = mpsc::channel::<Value>(128);
         let codex = Arc::new(Self {
             catalog,
+            usage,
             search: Arc::new(Mutex::new(search)),
             search_gate: tokio::sync::Mutex::new(()),
             agents,
@@ -156,6 +164,14 @@ impl Codex {
             tracing::error!(%error,"Cannot update session catalog");
         }
         match message["method"].as_str().unwrap_or_default() {
+            "thread/tokenUsage/updated" => {
+                let agent = params["threadId"]
+                    .as_str()
+                    .and_then(|t| self.agents.agent_id(t));
+                if let Err(error) = self.usage.record(params, agent.as_deref()) {
+                    tracing::error!(%error,"Cannot record token usage");
+                }
+            }
             "turn/started" => {
                 if let (Some(thread), Some(turn)) =
                     (params["threadId"].as_str(), params["turn"]["id"].as_str())
@@ -168,6 +184,9 @@ impl Codex {
                 }
             }
             "turn/completed" => {
+                if let Err(error) = self.usage.completed(params) {
+                    tracing::error!(%error,"Cannot record usage completion");
+                }
                 if let Some(thread) = params["threadId"].as_str() {
                     let completed = params["turn"]["id"].as_str();
                     let current = {
@@ -272,6 +291,20 @@ impl Codex {
             .context("Codex request timed out; check the session before retrying")??;
         let value = value.map_err(|e| anyhow::anyhow!(e))?;
         self.catalog.record(method, &params, &value)?;
+        if matches!(method, "thread/start" | "thread/resume" | "turn/start") {
+            let thread = value["thread"]["id"]
+                .as_str()
+                .or_else(|| params["threadId"].as_str());
+            if let Some(thread) = thread
+                && let Err(error) = self.usage.configure(
+                    thread,
+                    method == "thread/start",
+                    params["model"].as_str().or_else(|| value["model"].as_str()),
+                )
+            {
+                tracing::error!(%error,"Cannot record usage metadata");
+            }
+        }
         if matches!(
             method,
             "thread/start"

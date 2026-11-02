@@ -524,3 +524,84 @@ async fn session_search_reads_all_folders_without_resuming_or_starting_a_turn() 
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn usage_is_recorded_without_browser_subscribers_and_survives_restart() {
+    let dir = test_support::tempdir();
+    let binary = dir.path().join("codex-test");
+    std::fs::write(&binary, include_str!("fixtures/codex.py")).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(binary.with_extension("usage"), "").unwrap();
+    let catalog = dir.path().join("sessions.json");
+    let codex = Codex::spawn_managed(binary.to_str().unwrap(), Some(catalog.clone()))
+        .await
+        .unwrap();
+    let thread = codex
+        .call(
+            "thread/start",
+            json!({"cwd":dir.path(),"model":"test-model"}),
+        )
+        .await
+        .unwrap()["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let agent = uuid::Uuid::new_v4().to_string();
+    worker::dispatch(
+        codex.clone(),
+        "manager/agent/register",
+        json!({
+            "id":agent,"thread":thread,"host":"http://127.0.0.1:8080","token":"fixture-token"
+        }),
+    )
+    .await
+    .unwrap();
+    codex
+        .call(
+            "turn/start",
+            json!({"threadId":thread,"input":[{"type":"text","text":"Fixture only"}]}),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = worker::dispatch(codex.clone(), "manager/usage", json!({"agentId":agent}))
+                .await
+                .unwrap();
+            if page["totals"]["totalTokens"] == 240 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    codex
+        .respond(json!({"requestId":100,"result":{"decision":"accept"}}))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = worker::dispatch(codex.clone(), "manager/usage", json!({}))
+                .await
+                .unwrap();
+            if page["data"][0]["status"] == "completed" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let restarted = Codex::spawn_managed(binary.to_str().unwrap(), Some(catalog))
+        .await
+        .unwrap();
+    let page = worker::dispatch(restarted, "manager/usage", json!({"agentId":agent}))
+        .await
+        .unwrap();
+    assert_eq!(page["totals"]["totalTokens"], 240);
+    assert_eq!(page["totals"]["turns"], 1);
+    assert_eq!(page["data"][0]["agentId"], agent);
+    assert_eq!(page["data"][0]["configuredModel"], "test-model");
+    assert_eq!(page["data"][0]["partial"], false);
+}
