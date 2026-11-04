@@ -69,7 +69,12 @@ impl Ledger {
                 agent TEXT, model TEXT, tokens TEXT NOT NULL, partial INTEGER NOT NULL,
                 first_seen INTEGER NOT NULL, updated_at INTEGER NOT NULL, status TEXT NOT NULL,
                 UNIQUE(thread,turn));
-            CREATE INDEX IF NOT EXISTS usage_agent ON usage_turns(agent,seq);")?;
+            CREATE INDEX IF NOT EXISTS usage_agent ON usage_turns(agent,seq);
+            CREATE TABLE IF NOT EXISTS usage_daily(
+                thread TEXT NOT NULL, turn TEXT NOT NULL, day TEXT NOT NULL,
+                agent TEXT, input INTEGER NOT NULL, cached INTEGER NOT NULL,
+                output INTEGER NOT NULL, partial INTEGER NOT NULL,
+                PRIMARY KEY(thread,turn,day));")?;
         Ok(Self(Mutex::new(db)))
     }
     pub fn configure(&self, thread: &str, fresh: bool, model: Option<&str>) -> Result<()> {
@@ -90,6 +95,9 @@ impl Ledger {
         Ok(())
     }
     pub fn record(&self, p: &Value, agent: Option<&str>) -> Result<()> {
+        self.record_at(p, agent, crate::now())
+    }
+    fn record_at(&self, p: &Value, agent: Option<&str>, observed_at: i64) -> Result<()> {
         let thread = p["threadId"].as_str().context("Usage thread missing")?;
         let turn = p["turnId"].as_str().context("Usage turn missing")?;
         let total: Tokens = serde_json::from_value(p["tokenUsage"]["total"].clone())?;
@@ -142,6 +150,12 @@ impl Ledger {
                 |r| r.get(0),
             )
             .optional()?;
+        tx.execute("INSERT INTO usage_daily(thread,turn,day,agent,input,cached,output,partial)
+            VALUES(?1,?2,date(?3,'unixepoch'),?4,?5,?6,?7,?8)
+            ON CONFLICT(thread,turn,day) DO UPDATE SET
+                input=usage_daily.input+excluded.input,cached=usage_daily.cached+excluded.cached,
+                output=usage_daily.output+excluded.output,partial=MAX(usage_daily.partial,excluded.partial)",
+            params![thread,turn,observed_at,agent,delta.input_tokens,delta.cached_input_tokens,delta.output_tokens,partial])?;
         let mut combined = serde_json::to_value(delta)?;
         if let Some(prior) = prior {
             let prior: Value = serde_json::from_str(&prior)?;
@@ -160,7 +174,7 @@ impl Ledger {
             ON CONFLICT(thread,turn) DO UPDATE SET tokens=excluded.tokens,
                 partial=MAX(usage_turns.partial,excluded.partial),updated_at=excluded.updated_at,
                 agent=COALESCE(usage_turns.agent,excluded.agent)",
-            params![thread,turn,agent,combined.to_string(),partial,crate::now()])?;
+            params![thread,turn,agent,combined.to_string(),partial,observed_at])?;
         tx.commit()?;
         Ok(())
     }
@@ -175,6 +189,22 @@ impl Ledger {
             ],
         )?;
         Ok(())
+    }
+    pub fn daily(&self, p: &Value) -> Result<Value> {
+        let agent = p["agentId"].as_str().context("Agent id required")?;
+        let db = self.0.lock().unwrap();
+        let data = db
+            .prepare(
+                "SELECT day,SUM(input),SUM(cached),SUM(output),MAX(partial)
+            FROM usage_daily WHERE agent=?1 GROUP BY day ORDER BY day DESC LIMIT 366",
+            )?
+            .query_map([agent], |r| {
+                Ok(json!({"day":r.get::<_,String>(0)?,
+                "inputTokens":r.get::<_,i64>(1)?,"cachedInputTokens":r.get::<_,i64>(2)?,
+                "outputTokens":r.get::<_,i64>(3)?,"partial":r.get::<_,bool>(4)?}))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(json!({"data":data,"timezone":"UTC"}))
     }
     pub fn page(&self, p: &Value) -> Result<Value> {
         let db = self.0.lock().unwrap();
@@ -228,6 +258,33 @@ mod tests {
             "inputTokens":10,"cachedInputTokens":4,"outputTokens":2,
             "reasoningOutputTokens":1,"totalTokens":12}}})
     }
+    #[test]
+    fn daily_buckets_split_a_long_turn_without_rebilling_duplicates() {
+        let ledger = Ledger::open(None).unwrap();
+        ledger.configure("thread", true, None).unwrap();
+        ledger
+            .record_at(&snapshot("one", 1), Some("agent"), 86400)
+            .unwrap();
+        ledger
+            .record_at(&snapshot("one", 3), Some("agent"), 172800)
+            .unwrap();
+        ledger
+            .record_at(&snapshot("one", 3), Some("agent"), 172800)
+            .unwrap();
+        let page = ledger.daily(&json!({"agentId":"agent"})).unwrap();
+        assert_eq!(page["data"].as_array().unwrap().len(), 2);
+        assert_eq!(page["data"][0]["day"], "1970-01-03");
+        assert_eq!(page["data"][0]["inputTokens"], 20);
+        assert_eq!(page["data"][0]["outputTokens"], 4);
+        assert_eq!(page["data"][1]["day"], "1970-01-02");
+        assert_eq!(page["data"][1]["inputTokens"], 10);
+        assert!(ledger.daily(&json!({})).is_err());
+        assert_eq!(
+            ledger.daily(&json!({"agentId":"other"})).unwrap()["data"],
+            json!([])
+        );
+    }
+
     #[test]
     fn cumulative_updates_are_durable_idempotent_and_attributed_per_turn() {
         let dir = crate::test_support::tempdir();

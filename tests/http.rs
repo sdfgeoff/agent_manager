@@ -1032,3 +1032,104 @@ async fn generated_openapi_requires_auth_and_registered_types_validate_real_endp
         "Read-only operations must not publish change events"
     );
 }
+
+#[tokio::test]
+async fn agent_estimate_rates_require_human_auth_and_csrf_and_persist() {
+    let server = Server::new().await;
+    let cookie = server.login().await;
+    let (worker, _) = server.worker().await;
+    let id = uuid::Uuid::new_v4().to_string();
+    let token = security::token();
+    server
+        .app
+        .store
+        .board_add_agent(
+            &agentmanager::board::Agent {
+                id: id.clone(),
+                handle: "cost-fixture".into(),
+                name: "Cost fixture".into(),
+                worker,
+                thread: "fixture".into(),
+                persona: "Fixture".into(),
+                settings: json!({}),
+                paused: false,
+                error: None,
+            },
+            &token,
+        )
+        .unwrap();
+    let endpoint = format!("{}/api/settings/usage-pricing/{id}", server.url);
+    let rates = json!({"input":2.0,"cachedInput":0.5,"output":10.0});
+    assert_eq!(
+        server.client.get(&endpoint).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        server
+            .client
+            .get(&endpoint)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(
+        server
+            .client
+            .get(&endpoint)
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+            .is_null()
+    );
+    assert_eq!(
+        server
+            .client
+            .post(&endpoint)
+            .header("Cookie", &cookie)
+            .json(&rates)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let save = |body: Value| {
+        server
+            .client
+            .post(&endpoint)
+            .header("Cookie", &cookie)
+            .header("Origin", &server.url)
+            .header("X-Agentmanager", "1")
+            .json(&body)
+    };
+    assert_eq!(
+        save(json!({"input":-1,"cachedInput":0,"output":1}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(save(rates).send().await.unwrap().status(), StatusCode::OK);
+    let result = server
+        .client
+        .get(&endpoint)
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(result["input"], 2.0);
+    assert_eq!(result["cachedInput"], 0.5);
+    assert_eq!(result["output"], 10.0);
+    assert!(result["updatedAt"].as_i64().unwrap() > 0);
+}

@@ -1,3 +1,4 @@
+import AgentCostChart from "./AgentCostChart";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Bot,
@@ -313,7 +314,7 @@ export function AgentDialog({ agent = null, source = null, onClose }) {
     <Modal
       title={
         agent
-          ? "Edit agent"
+          ? "Agent settings"
           : source
             ? "Register session as an agent"
             : "Create an agent"
@@ -430,6 +431,7 @@ export function AgentDialog({ agent = null, source = null, onClose }) {
           {agent ? "Save agent" : "Create agent"}
         </BusyButton>
       </form>
+      {agent && <AgentCostChart agent={agent} />}
     </Modal>
   );
 }
@@ -511,7 +513,7 @@ export default function Agents({ params }) {
             <div className="agent-actions">
               <button onClick={() => setEditing(a)}>
                 <Settings2 size={15} />
-                Edit persona
+                Settings
               </button>
               <button disabled={busy === a.id} onClick={() => pause(a)}>
                 {a.paused ? <Play size={15} /> : <Pause size={15} />}{" "}

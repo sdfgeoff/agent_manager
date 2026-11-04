@@ -206,6 +206,7 @@ pub async fn dispatch(codex: Arc<Codex>, method: &str, params: Value) -> Result<
     match method {
         "manager/search" => crate::search::sessions(codex, params).await,
         "manager/list" => codex.list_sessions(params).await,
+        "manager/usage/daily" => codex.usage.daily(&params),
         "manager/usage" => codex.usage.page(&params),
         "manager/status" => Ok(status(&codex)),
         "manager/respond" => codex.respond(params).await,

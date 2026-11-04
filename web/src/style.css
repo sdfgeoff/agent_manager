@@ -2013,3 +2013,26 @@ mark {
     display: none;
   }
 }
+
+.agent-cost-chart {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.agent-cost-chart details {
+  margin: 14px 0;
+}
+.agent-cost-chart summary {
+  cursor: pointer;
+}
+.agent-cost-chart table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+}
+.agent-cost-chart th,
+.agent-cost-chart td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}

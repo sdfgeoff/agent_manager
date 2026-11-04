@@ -264,3 +264,15 @@ failures or counter discontinuities can leave incomplete coverage. Decreasing
 or duplicate total counters are ignored as stale snapshots. A turn with no
 reported usage has no ledger row. Configured model metadata is descriptive,
 not proof that every request used that model, and no dollar estimate is made.
+
+Agent settings include an estimated USD cost chart for the last 30 UTC days or
+12 months. Save input, cached-input and output rates (USD per million tokens)
+per agent; these are shared server settings, applied as an explicit assumption
+to all observed usage for that agent. Changing rates recalculates the chart.
+No official model prices are assumed and the chart is not a subscription bill.
+
+Daily collection requires the worker's optional `manager/usage/daily` RPC.
+Daily increments are recorded transactionally with the turn ledger, including
+turns spanning UTC midnight. Earlier turn-only records are not backfilled.
+Unknown dates are gaps, and monthly totals include observed days only.
+The chart includes a table of values for accessibility.

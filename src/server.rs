@@ -2,6 +2,7 @@ mod accounts;
 mod board_http;
 mod presence;
 mod push_http;
+mod usage_pricing;
 mod frontend {
     include!(concat!(env!("OUT_DIR"), "/frontend.rs"));
 }
@@ -218,6 +219,7 @@ pub fn router(app: Arc<App>) -> Router {
             get(|| async { Json(json!({"version":env!("CARGO_PKG_VERSION")})) }),
         )
         .merge(accounts::routes())
+        .merge(usage_pricing::routes())
         .merge(push_http::routes())
         .merge(presence::routes())
         .route("/", get(frontend_asset))
