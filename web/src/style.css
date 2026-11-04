@@ -2046,3 +2046,10 @@ mark {
   border-radius: 10px;
   background: #203425;
 }
+
+.new-replies-jump {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 5;
+}

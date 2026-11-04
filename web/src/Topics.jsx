@@ -1,5 +1,5 @@
 import { ReminderDialog } from "./Reminders";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Plus,
   Search,
@@ -379,6 +379,49 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
   const sentReply = useRef(null);
   const scrolledReply = useRef(null);
   const [fillingGap, setFillingGap] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [newReplies, setNewReplies] = useState(0);
+  const displayed = useRef(null);
+  const loadedTarget = useRef(null);
+  const pendingView = useRef(null);
+  function atBottom() {
+    const node = scroll.current;
+    return (
+      !node || node.scrollHeight - node.scrollTop - node.clientHeight < 120
+    );
+  }
+  function rememberPosition() {
+    const node = scroll.current;
+    if (!node) return null;
+    const edge = node.getBoundingClientRect().top;
+    const post = [...node.querySelectorAll(".post[id]")].find(
+      (el) => el.getBoundingClientRect().bottom > edge,
+    );
+    return {
+      kind: "position",
+      id: post?.id,
+      top: post?.getBoundingClientRect().top,
+      scrollTop: node.scrollTop,
+    };
+  }
+  function jumpLatest() {
+    if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
+    setNewReplies(0);
+  }
+  useLayoutEffect(() => {
+    displayed.current = topic;
+    const view = pendingView.current;
+    pendingView.current = null;
+    const node = scroll.current;
+    if (!node || !view) return;
+    if (view.kind === "bottom") node.scrollTop = node.scrollHeight;
+    else {
+      const post = view.id && document.getElementById(view.id);
+      node.scrollTop = post
+        ? node.scrollTop + post.getBoundingClientRect().top - view.top
+        : view.scrollTop;
+    }
+  }, [topic]);
   function mergeReplies(...groups) {
     return [...new Map(groups.flat().map((r) => [r.id, r])).values()].sort(
       (a, b) => a.id - b.id,
@@ -403,6 +446,27 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
         t.nextCursor = linked.nextCursor;
       }
       if (version === sequence.current) {
+        const previous = displayed.current;
+        const target = latest ? "" : reply || "";
+        const preserving =
+          previous && loadedTarget.current === target && !latest;
+        if (preserving) {
+          const follow = atBottom();
+          const previousNewest = previous.replies.at(-1)?.id || 0;
+          const added = t.replies.filter((r) => r.id > previousNewest).length;
+          pendingView.current = follow
+            ? { kind: "bottom" }
+            : rememberPosition();
+          t.replies = mergeReplies(previous.replies, t.replies);
+          t.nextCursor = previous.nextCursor;
+          t.linkGap = previous.linkGap;
+          if (follow) setNewReplies(0);
+          else if (added) setNewReplies((n) => n + added);
+        } else {
+          pendingView.current = !target ? { kind: "bottom" } : null;
+          setNewReplies(0);
+        }
+        loadedTarget.current = target;
         setTopic(t);
         setError(null);
       }
@@ -452,6 +516,7 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
     try {
       const page = await board("read_topic", { topic: id, before: gap.before });
       if (version !== sequence.current) return;
+      pendingView.current = rememberPosition();
       setTopic((t) => {
         if (t.linkGap?.before !== gap.before) return t;
         const start = page.replies[0]?.id;
@@ -474,22 +539,36 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
     }
   }
   async function earlier() {
+    if (loadingEarlier || !topic.nextCursor) return;
+    const version = sequence.current;
+    setLoadingEarlier(true);
     try {
       const older = await board("read_topic", {
         topic: id,
         before: topic.nextCursor,
       });
+      if (version !== sequence.current) return;
+      pendingView.current = rememberPosition();
       setTopic((t) => ({
         ...t,
-        replies: [...older.replies, ...t.replies],
+        replies: mergeReplies(older.replies, t.replies),
         nextCursor: older.nextCursor,
       }));
     } catch (e) {
-      setError(e);
+      if (version === sequence.current) setError(e);
+    } finally {
+      setLoadingEarlier(false);
     }
   }
   return (
-    <section className="topic-detail" aria-label="Topic details" ref={scroll}>
+    <section
+      className="topic-detail"
+      aria-label="Topic details"
+      ref={scroll}
+      onScroll={() => {
+        if (atBottom()) setNewReplies(0);
+      }}
+    >
       <div className="detail-top">
         <button className="text-button" onClick={onClose}>
           <ArrowLeft size={16} />
@@ -514,6 +593,13 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
         <span className="muted">#{id}</span>
       </div>
       <ErrorMessage error={error} />
+      {newReplies > 0 && (
+        <div className="new-replies-jump" aria-live="polite">
+          <button className="primary" onClick={jumpLatest}>
+            New replies ↓ ({newReplies})
+          </button>
+        </div>
+      )}
       {topic ? (
         <>
           <button
@@ -605,7 +691,11 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
           <div className="replies-heading">
             <h3>Replies</h3>
             {topic.nextCursor && (
-              <button onClick={earlier}>Load earlier replies</button>
+              <button disabled={loadingEarlier} onClick={earlier}>
+                {loadingEarlier
+                  ? "Loading earlier replies…"
+                  : "Load earlier replies"}
+              </button>
             )}
           </div>
           {topic.replies.map((r, index) => (
