@@ -377,13 +377,31 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
   const sequence = useRef(0);
   const scroll = useRef(null);
   const sentReply = useRef(null);
+  const scrolledReply = useRef(null);
+  const [fillingGap, setFillingGap] = useState(false);
+  function mergeReplies(...groups) {
+    return [...new Map(groups.flat().map((r) => [r.id, r])).values()].sort(
+      (a, b) => a.id - b.id,
+    );
+  }
   async function load(latest = false) {
     const version = ++sequence.current;
     try {
-      const t = await board("read_topic", {
-        topic: id,
-        ...(!latest && reply ? { reply: Number(reply) } : {}),
-      });
+      const t = await board("read_topic", { topic: id });
+      if (!latest && reply && !t.replies.some((r) => String(r.id) === reply)) {
+        const linked = await board("read_topic", {
+          topic: id,
+          reply: Number(reply),
+        });
+        const newestStart = t.replies[0]?.id;
+        const linkedEnd = linked.replies.at(-1)?.id;
+        t.linkGap =
+          newestStart && linkedEnd && newestStart > linkedEnd
+            ? { before: newestStart, after: linkedEnd }
+            : null;
+        t.replies = mergeReplies(linked.replies, t.replies);
+        t.nextCursor = linked.nextCursor;
+      }
       if (version === sequence.current) {
         setTopic(t);
         setError(null);
@@ -397,11 +415,15 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
     return () => sequence.current++;
   }, [id, reply, app.revision]);
   useEffect(() => {
-    if (reply && topic)
-      document
-        .getElementById("reply-" + reply)
-        ?.scrollIntoView({ block: "center" });
-  }, [reply, topic?.id]);
+    if (!reply) scrolledReply.current = null;
+    if (reply && topic && scrolledReply.current !== reply) {
+      const target = document.getElementById("reply-" + reply);
+      if (target) {
+        target.scrollIntoView({ block: "center" });
+        scrolledReply.current = reply;
+      }
+    }
+  }, [reply, topic]);
   useEffect(() => {
     if (
       sentReply.current &&
@@ -420,6 +442,35 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
       app.changed();
     } catch (e) {
       setError(e);
+    }
+  }
+  async function fillGap() {
+    if (fillingGap || !topic.linkGap) return;
+    const version = sequence.current;
+    const gap = topic.linkGap;
+    setFillingGap(true);
+    try {
+      const page = await board("read_topic", { topic: id, before: gap.before });
+      if (version !== sequence.current) return;
+      setTopic((t) => {
+        if (t.linkGap?.before !== gap.before) return t;
+        const start = page.replies[0]?.id;
+        return {
+          ...t,
+          replies: mergeReplies(
+            t.replies,
+            page.replies.filter((r) => r.id > gap.after),
+          ),
+          linkGap:
+            start > gap.after && page.nextCursor
+              ? { ...gap, before: start }
+              : null,
+        };
+      });
+    } catch (e) {
+      if (version === sequence.current) setError(e);
+    } finally {
+      setFillingGap(false);
     }
   }
   async function earlier() {
@@ -533,7 +584,7 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
           </article>
           {reply && (
             <p className="notice">
-              Showing replies up to the linked reply.{" "}
+              Linked reply highlighted. Latest replies are also shown.{" "}
               <a
                 href={href("topics", {
                   ...Object.fromEntries(route().params),
@@ -557,21 +608,35 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
               <button onClick={earlier}>Load earlier replies</button>
             )}
           </div>
-          {topic.replies.map((r) => (
-            <article
-              className={
-                "post" + (String(r.id) === reply ? " search-focus" : "")
-              }
-              id={"reply-" + r.id}
-              key={r.id}
-            >
-              <div className="post-by">
-                <Person id={r.author} />
-                <time>{new Date(r.createdAt * 1000).toLocaleString()}</time>
-              </div>
-              <RichText text={r.body} />
-              <Attachments files={r.attachments} />
-            </article>
+          {topic.replies.map((r, index) => (
+            <React.Fragment key={r.id}>
+              {topic.linkGap &&
+                r.id >= topic.linkGap.before &&
+                (index === 0 ||
+                  topic.replies[index - 1].id < topic.linkGap.before) && (
+                  <p className="notice">
+                    Some replies between the linked message and latest replies
+                    aren't loaded.{" "}
+                    <button disabled={fillingGap} onClick={fillGap}>
+                      {fillingGap ? "Loading replies…" : "Load replies between"}
+                    </button>
+                  </p>
+                )}
+              <article
+                className={
+                  "post" + (String(r.id) === reply ? " search-focus" : "")
+                }
+                id={"reply-" + r.id}
+                key={r.id}
+              >
+                <div className="post-by">
+                  <Person id={r.author} />
+                  <time>{new Date(r.createdAt * 1000).toLocaleString()}</time>
+                </div>
+                <RichText text={r.body} />
+                <Attachments files={r.attachments} />
+              </article>
+            </React.Fragment>
           ))}
           <Composer
             draftKey={`reply:${id}`}
@@ -586,8 +651,7 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
                 current.page === "topics" &&
                 Number(current.params.get("topic")) === id
               ) {
-                // Deep links cap the loaded history at their reply. After sending,
-                // both the URL and this in-flight refresh must request latest replies.
+                // After sending, focus the new reply and keep refreshes on latest history.
                 sentReply.current = posted.id;
                 navigate("topics", {
                   ...Object.fromEntries(current.params),
