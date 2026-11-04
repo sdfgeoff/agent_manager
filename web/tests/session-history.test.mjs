@@ -101,3 +101,19 @@ test("long live turns stay bounded while batched deltas and completion replace t
     "input snapshot remains unchanged",
   );
 });
+
+test("legacy summaries cannot create an unbounded rendered page", async () => {
+  const result = await historyPage(
+    async () => ({
+      data: [
+        { items: Array.from({ length: 5000 }, (_, i) => ({ id: String(i) })) },
+      ],
+      nextCursor: null,
+    }),
+    "session",
+    null,
+    "summary",
+  );
+  assert.equal(result.items.length, LIVE_ITEM_LIMIT);
+  assert.equal(result.items.at(-1).id, "4999");
+});

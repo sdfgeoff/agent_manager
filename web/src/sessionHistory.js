@@ -42,7 +42,10 @@ export async function historyPage(
     limit: 5,
   });
   return {
-    items: [...page.data].reverse().flatMap((turn) => turn.items || []),
+    items: [...page.data]
+      .reverse()
+      .flatMap((turn) => turn.items || [])
+      .slice(-LIVE_ITEM_LIMIT),
     nextCursor: page.nextCursor,
     mode,
   };
