@@ -116,6 +116,13 @@ for line in sys.stdin:
     elif method == 'thread/name/set':
         threads[params['threadId']]['name'] = params['name']
         save()
+    elif method == 'thread/items/list':
+        items = [{'turnId': turn['id'], 'item': item} for turn in threads[params['threadId']]['turns'] for item in turn['items']]
+        if params.get('sortDirection') == 'desc':
+            items.reverse()
+        offset = int((params.get('cursor') or 'item:0').split(':')[1])
+        end = offset + params.get('limit', 50)
+        result = {'data': items[offset:end], 'nextCursor': 'item:' + str(end) if end < len(items) else None}
     elif method == 'thread/turns/list':
         result = {'data': list(reversed(threads[params['threadId']]['turns'])), 'nextCursor': None}
     elif method == 'turn/start':

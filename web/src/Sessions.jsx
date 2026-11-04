@@ -17,6 +17,12 @@ import { api, rpc, href, navigate, events, authGuard } from "./api";
 import { useApp, useDraft } from "./context";
 import { Modal, ErrorMessage, RichText, BusyButton } from "./components";
 import { AgentDialog, FolderPicker, CodexFields, codexParams } from "./Agents";
+import {
+  historyPage,
+  mergeSessionEvents,
+  LIVE_ITEM_LIMIT,
+  TEXT_PAGE_SIZE,
+} from "./sessionHistory";
 export default function Sessions({ params }) {
   const app = useApp();
   const worker =
@@ -63,6 +69,16 @@ export default function Sessions({ params }) {
   const bottom = useRef(null);
   const syncing = useRef(false);
   const buffer = useRef([]);
+  const liveBuffer = useRef([]);
+  const liveTimer = useRef(null);
+  const historyMode = useRef("items");
+  const historyRequest = useRef(0);
+  const historyTrail = useRef([]);
+  const pageCursor = useRef(null);
+  const [past, setPast] = useState(false);
+  const [paging, setPaging] = useState(false);
+  const [summarized, setSummarized] = useState(false);
+  const [newer, setNewer] = useState(false);
   const active = status.active?.[threadId];
   async function list(more = false) {
     if (!worker || !selectedWorker?.online) {
@@ -103,6 +119,7 @@ export default function Sessions({ params }) {
   }
   function scroll(force = false) {
     const node = scroller.current;
+    if (!force && historyTrail.current.length) return;
     if (
       node &&
       (force || node.scrollHeight - node.scrollTop - node.clientHeight < 240)
@@ -115,32 +132,22 @@ export default function Sessions({ params }) {
     const p = message.params || {};
     if (p.threadId && p.threadId !== threadId) return;
     if (
-      message.method === "item/completed" ||
-      message.method === "item/started"
+      ["item/started", "item/completed", "item/agentMessage/delta"].includes(
+        message.method,
+      )
     ) {
-      if (p.item?.id) {
-        setItems((old) => {
-          const i = old.findIndex((x) => x.id === p.item.id);
-          return i < 0
-            ? [...old, p.item]
-            : old.map((x, j) => (j === i ? p.item : x));
-        });
-        scroll();
+      if (historyTrail.current.length) setNewer(true);
+      else {
+        liveBuffer.current.push(message);
+        if (!liveTimer.current)
+          liveTimer.current = setTimeout(() => {
+            const messages = liveBuffer.current;
+            liveBuffer.current = [];
+            liveTimer.current = null;
+            setItems((old) => mergeSessionEvents(old, messages));
+            scroll();
+          }, 50);
       }
-    }
-    if (message.method === "item/agentMessage/delta") {
-      setItems((old) => {
-        const i = old.findIndex((x) => x.id === p.itemId);
-        if (i < 0)
-          return [
-            ...old,
-            { id: p.itemId, type: "agentMessage", text: p.delta || "" },
-          ];
-        return old.map((x, j) =>
-          j === i ? { ...x, text: (x.text || "") + (p.delta || "") } : x,
-        );
-      });
-      scroll();
     }
     if (
       ["turn/started", "turn/completed", "manager/requestsChanged"].includes(
@@ -158,51 +165,71 @@ export default function Sessions({ params }) {
   async function refreshHistory(initial = false) {
     if (!threadId || !selectedWorker?.online || (!initial && syncing.current))
       return;
+    if (!initial && historyTrail.current.length) {
+      loadStatus();
+      return;
+    }
     const current = epoch.current;
+    const request = ++historyRequest.current;
     syncing.current = true;
     buffer.current = [];
     if (initial) setLoading(true);
     try {
       const [read, history] = await Promise.all([
-        rpc(worker, "thread/read", { threadId }),
-        rpc(worker, "thread/turns/list", {
+        rpc(worker, "thread/read", { threadId, includeTurns: false }),
+        historyPage(
+          (method, params) => rpc(worker, method, params),
           threadId,
-          itemsView: "full",
-          sortDirection: "desc",
-          limit: 20,
-        }),
+          null,
+          historyMode.current,
+        ),
       ]);
-      if (epoch.current !== current) return;
+      if (epoch.current !== current || historyRequest.current !== request)
+        return;
       setThread(read.thread);
-      const loaded = [...history.data].reverse().flatMap((t) => t.items || []);
+      historyMode.current = history.mode;
+      setSummarized(history.mode === "summary");
       setItems((old) =>
         initial
-          ? loaded
-          : [
-              ...new Map(
-                [...old, ...loaded].map((item) => [item.id, item]),
-              ).values(),
-            ],
+          ? history.items
+          : mergeSessionEvents(
+              old,
+              history.items.map((item) => ({
+                method: "item/completed",
+                params: { item },
+              })),
+            ),
       );
-      if (initial) setOlder(history.nextCursor);
+      setOlder(history.nextCursor);
       syncing.current = false;
       for (const message of buffer.current) incoming(message);
       buffer.current = [];
       await loadStatus();
       if (!searchText) scroll(initial);
     } catch (e) {
-      if (epoch.current === current) {
+      if (epoch.current === current && historyRequest.current === request) {
         syncing.current = false;
         setError(e);
       }
     } finally {
-      if (epoch.current === current) setLoading(false);
+      if (epoch.current === current && historyRequest.current === request)
+        setLoading(false);
     }
   }
   useEffect(() => {
     epoch.current++;
     setSearchPages(0);
     setSearchingHistory(false);
+    clearTimeout(liveTimer.current);
+    liveTimer.current = null;
+    liveBuffer.current = [];
+    historyMode.current = "items";
+    historyTrail.current = [];
+    pageCursor.current = null;
+    setPast(false);
+    setPaging(false);
+    setNewer(false);
+    setSummarized(false);
     setThread(null);
     setItems([]);
     setOlder(null);
@@ -210,7 +237,12 @@ export default function Sessions({ params }) {
     syncing.current = false;
     buffer.current = [];
     refreshHistory(true);
-    return () => epoch.current++;
+    return () => {
+      epoch.current++;
+      clearTimeout(liveTimer.current);
+      liveTimer.current = null;
+      liveBuffer.current = [];
+    };
   }, [worker, threadId, selectedWorker?.online]);
   useEffect(() => {
     const handler = (event) => {
@@ -247,6 +279,17 @@ export default function Sessions({ params }) {
     const sent = text;
     const stillSignedIn = authGuard();
     try {
+      if (searchText) navigate("sessions", { worker, thread: threadId });
+      setSearchingHistory(false);
+      if (historyTrail.current.length || syncing.current) {
+        historyTrail.current = [];
+        setPaging(false);
+        pageCursor.current = null;
+        setPast(false);
+        setNewer(false);
+        await refreshHistory(true);
+        stillSignedIn();
+      }
       const input = [{ type: "text", text: sent.trim() }];
       if (active)
         await rpc(worker, "turn/steer", {
@@ -349,39 +392,83 @@ export default function Sessions({ params }) {
     searchingHistory,
     searchPages,
   ]);
-  async function oldMessages(searching = false) {
+  async function oldMessages(searching = false, later = false) {
+    if (syncing.current) return;
     if (searching) setSearchingHistory(true);
+    syncing.current = true;
+    clearTimeout(liveTimer.current);
+    liveTimer.current = null;
+    liveBuffer.current = [];
+    buffer.current = [];
+    setPaging(true);
     const current = epoch.current;
-    const node = scroller.current;
-    const height = node?.scrollHeight;
+    const request = ++historyRequest.current;
     try {
-      const page = await rpc(worker, "thread/turns/list", {
+      const call = (method, params) => rpc(worker, method, params);
+      let cursor;
+      if (later) cursor = historyTrail.current.at(-1);
+      else if (!historyTrail.current.length) {
+        // Live items are capped. Recompute the cursor from the current head so
+        // messages evicted from memory remain reachable without cursor gaps.
+        const head = await historyPage(
+          call,
+          threadId,
+          null,
+          historyMode.current,
+        );
+        if (current !== epoch.current || historyRequest.current !== request)
+          return;
+        historyMode.current = head.mode;
+        cursor = head.nextCursor;
+        if (!cursor) {
+          setOlder(null);
+          return;
+        }
+      } else cursor = older;
+      if (!later && !cursor) return;
+      const page = await historyPage(
+        call,
         threadId,
-        cursor: older,
-        itemsView: "full",
-        sortDirection: "desc",
-        limit: 20,
-      });
-      if (current !== epoch.current) return;
-      setItems((old) => [
-        ...new Map(
-          [...page.data]
-            .reverse()
-            .flatMap((t) => t.items || [])
-            .concat(old)
-            .map((x) => [x.id, x]),
-        ).values(),
-      ]);
+        cursor,
+        historyMode.current,
+      );
+      if (current !== epoch.current || historyRequest.current !== request)
+        return;
+      if (later) historyTrail.current.pop();
+      else historyTrail.current.push(pageCursor.current);
+      pageCursor.current = cursor;
+      historyMode.current = page.mode;
+      setPast(historyTrail.current.length > 0);
+      setNewer(false);
+      setItems(page.items);
       setOlder(page.nextCursor);
+      setSummarized(page.mode === "summary");
       requestAnimationFrame(() => {
-        if (!searching && node && height)
-          node.scrollTop += node.scrollHeight - height;
+        if (scroller.current)
+          scroller.current.scrollTop = later
+            ? 0
+            : scroller.current.scrollHeight;
       });
     } catch (e) {
-      setError(e);
+      if (current === epoch.current && historyRequest.current === request)
+        setError(e);
     } finally {
-      if (current === epoch.current && searching) setSearchingHistory(false);
+      if (current === epoch.current && historyRequest.current === request) {
+        syncing.current = false;
+        for (const message of buffer.current) incoming(message);
+        buffer.current = [];
+        setPaging(false);
+        if (searching) setSearchingHistory(false);
+      }
     }
+  }
+  function latestMessages() {
+    if (syncing.current) return;
+    historyTrail.current = [];
+    pageCursor.current = null;
+    setPast(false);
+    setNewer(false);
+    refreshHistory(true);
   }
   return (
     <section className="sessions-workspace">
@@ -578,10 +665,36 @@ export default function Sessions({ params }) {
                 )}
               </div>
             )}
+            {summarized && (
+              <p className="session-search-notice">
+                This Codex installation provides summarized history. Update
+                Codex for complete item-by-item history.
+              </p>
+            )}
+            {past && (
+              <div className="history-navigation">
+                <span>
+                  {newer ? "New activity · " : ""}Viewing earlier messages
+                </span>
+                <button
+                  disabled={paging}
+                  onClick={() => oldMessages(false, true)}
+                >
+                  Later messages
+                </button>
+                <button disabled={paging} onClick={latestMessages}>
+                  Latest
+                </button>
+              </div>
+            )}
             <div className="chat-history" ref={scroller}>
               {loading && <p className="muted">Loading session…</p>}
-              {older && (
-                <button className="load-more" onClick={() => oldMessages()}>
+              {(older || (!past && items.length >= LIVE_ITEM_LIMIT)) && (
+                <button
+                  className="load-more"
+                  disabled={paging || loading}
+                  onClick={() => oldMessages()}
+                >
                   Load earlier messages
                 </button>
               )}
@@ -591,7 +704,7 @@ export default function Sessions({ params }) {
                   className={matched(item) ? "search-focus" : ""}
                   key={item.id}
                 >
-                  <SessionItem item={item} />
+                  <SessionItem item={item} searchText={searchText} />
                 </div>
               ))}
               {status.requests
@@ -710,7 +823,52 @@ export default function Sessions({ params }) {
     </section>
   );
 }
-function SessionItem({ item }) {
+function PagedSessionText({ text, markdown = false, searchText = "" }) {
+  const [part, setPart] = useState(0);
+  const count = Math.max(1, Math.ceil(text.length / TEXT_PAGE_SIZE));
+  const selected = Math.min(part, count - 1);
+  useEffect(() => {
+    if (!searchText) return;
+    const index = text
+      .toLowerCase()
+      .indexOf(searchText.toLowerCase().split(/\s+/)[0]);
+    if (index >= 0) setPart(Math.floor(index / TEXT_PAGE_SIZE));
+  }, [searchText]);
+  const excerpt = text.slice(
+    selected * TEXT_PAGE_SIZE,
+    (selected + 1) * TEXT_PAGE_SIZE,
+  );
+  return (
+    <>
+      {count === 1 && markdown ? (
+        <RichText text={text} />
+      ) : (
+        <pre className="session-text">{excerpt}</pre>
+      )}
+      {count > 1 && (
+        <div className="text-navigation">
+          <button
+            disabled={selected === 0}
+            onClick={() => setPart(selected - 1)}
+          >
+            Previous part
+          </button>
+          <span>
+            Part {selected + 1} of {count}
+          </span>
+          <button
+            disabled={selected === count - 1}
+            onClick={() => setPart(selected + 1)}
+          >
+            Next part
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+const SessionItem = React.memo(function SessionItem({ item, searchText }) {
+  const [open, setOpen] = useState(false);
   if (["userMessage", "agentMessage"].includes(item.type)) {
     const text =
       item.type === "agentMessage"
@@ -723,7 +881,7 @@ function SessionItem({ item }) {
         <div className="message-label">
           {item.type === "userMessage" ? "You" : "Codex"}
         </div>
-        <RichText text={text} />
+        <PagedSessionText text={text} markdown searchText={searchText} />
       </article>
     );
   }
@@ -736,22 +894,29 @@ function SessionItem({ item }) {
           ? "Reasoning"
           : item.type;
   return (
-    <details className="tool-output">
-      <summary>{title}</summary>
-      <pre>
-        {item.aggregatedOutput ||
-          item.output ||
-          (Array.isArray(item.summary)
-            ? item.summary
-                .map((s) =>
-                  typeof s === "string" ? s : s.text || JSON.stringify(s),
-                )
-                .join("\n")
-            : JSON.stringify(item, null, 2))}
-      </pre>
+    <details
+      className="tool-output"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>{String(title).slice(0, 300)}</summary>
+      {open && (
+        <PagedSessionText
+          text={String(
+            item.aggregatedOutput ||
+              item.output ||
+              (Array.isArray(item.summary)
+                ? item.summary
+                    .map((s) =>
+                      typeof s === "string" ? s : s.text || JSON.stringify(s),
+                    )
+                    .join("\n")
+                : JSON.stringify(item, null, 2)),
+          )}
+        />
+      )}
     </details>
   );
-}
+});
 function Request({ request, worker, onAnswered }) {
   const p = request.params || {};
   const [busy, setBusy] = useState(false);

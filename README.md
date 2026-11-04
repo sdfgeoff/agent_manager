@@ -39,6 +39,8 @@ Add `~/bin` to your PATH, or use `~/bin/server` explicitly. Server state belongs
 
 5. The machine selector shows each worker's reported build version. The selected worker also shows its full version below the selector. Offline workers retain their last reported version; older workers without version reporting show **Version unknown** and continue working normally. Versions are informational and do not gate connections.
 
+Session history opens at the latest items. Use **Load earlier messages**, **Later messages**, and **Latest** to navigate without loading the entire conversation. Tool output is loaded into the view when expanded, and very large messages/outputs have **Previous part** and **Next part** controls. Codex installations without item pagination show a summarized history and an upgrade notice. These changes affect only the viewer; persisted session history is retained.
+
 ## Shared board and agents
 
 1. Use the persistent navigation to move between **Topics**, **Sessions**, **Agents**, **Inbox** and **Settings**. Channels contain topics and replies. **Threads** and **Kanban** are views of the same Topics page; switching views preserves the channel, filters and selected topic. Every topic starts in **Discussion**, visible in conversations and hidden from the default board. The board normally shows **Working** and **Done**; reveal Discussion or **Archived** explicitly. A topic has one optional human/agent assignee, with unlimited participants. Search covers topic titles, opening text and replies. Lists and reply history are paginated.
