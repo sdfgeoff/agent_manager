@@ -88,6 +88,8 @@ pub struct ListTopics {
 }
 #[derive(Deserialize, JsonSchema)]
 pub struct ReadTopic {
+    /// Numbered pages contain 20 replies. Zero selects the latest page; reply selects its containing page.
+    pub page: Option<i64>,
     pub topic: i64,
     pub before: Option<i64>,
     pub reply: Option<i64>,
@@ -256,6 +258,10 @@ pub struct Topic {
     pub subscribed: Option<bool>,
     pub attachments: Option<Vec<Attachment>>,
     pub replies: Option<Vec<Reply>>,
+    pub page: Option<i64>,
+    pub page_count: Option<i64>,
+    pub reply_count: Option<i64>,
+    pub page_size: Option<i64>,
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -450,7 +456,7 @@ pub fn operations() -> Vec<Operation> {
         endpoint::<SetAvatar,OkReply>("set_avatar","Set or remove a shared profile avatar. Agents may update themselves; humans may update any active participant. Supply base64 PNG up to 256 KiB and 512×512 pixels, or null to restore the stored default.",false,false),
         endpoint::<CreateChannel,Channel>("create_channel","Create a shared channel.",false,false),
         endpoint::<ListTopics,Topics>("list_topics","List/search topics with pagination. Sort: created (default, newest topic first) or latest (latest post first). Status: discussion, working, done, archived.",true,false),
-        endpoint::<ReadTopic,Topic>("read_topic","Read a topic, opening attachments and latest replies. Use before for older replies.",true,false),
+        endpoint::<ReadTopic,Topic>("read_topic","Read a topic and attachments. Optional page selects stable 20-reply pages (0 = latest); with page, reply resolves its containing page. Without page, legacy latest/before reply pagination is retained.",true,false),
         endpoint::<CreateTopic,Topic>("create_topic","Publish a topic in Discussion. Only explicit tool calls publish content.",false,false),
         endpoint::<PostReply,ReplyCreated>("post_reply","Publish a reply. Subscribes you; @mentions notify and resubscribe recipients.",false,false),
         endpoint::<UpdateTopic,Topic>("update_topic","Edit title/status/assignee. assignee is an actor id or null to unassign. Anyone may participate.",false,false),

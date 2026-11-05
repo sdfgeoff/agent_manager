@@ -50,13 +50,14 @@ export default function Topics({ params }) {
     discussion: showDiscussion ? "1" : "",
     archived: showArchived ? "1" : "",
     topic: selected,
+    page: params.get("page"),
     reply: params.get("reply"),
   };
   function patch(changes) {
     navigate("topics", {
       ...current,
       ...(changes.topic !== undefined && changes.topic !== selected
-        ? { reply: null }
+        ? { reply: null, page: null }
         : {}),
       ...changes,
     });
@@ -124,7 +125,12 @@ export default function Topics({ params }) {
     return (
       <a
         className={`topic-card ${selected === t.id ? "selected" : ""}`}
-        href={href("topics", { ...current, topic: t.id })}
+        href={href("topics", {
+          ...current,
+          topic: t.id,
+          reply: null,
+          page: null,
+        })}
         key={t.id}
       >
         <div className="card-meta">
@@ -368,6 +374,14 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
   const reply = new URLSearchParams(location.hash.split("?")[1] || "").get(
     "reply",
   );
+  const pageValue = new URLSearchParams(location.hash.split("?")[1] || "").get(
+    "page",
+  );
+  const page =
+    /^\d+$/.test(pageValue || "") && Number.isSafeInteger(Number(pageValue))
+      ? Number(pageValue)
+      : 0;
+  const scrolledPage = useRef(null);
   const [reminding, setReminding] = useState(false);
   const app = useApp();
   const [topic, setTopic] = useState(null);
@@ -378,33 +392,41 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
   const scroll = useRef(null);
   const sentReply = useRef(null);
   const scrolledReply = useRef(null);
-  const [fillingGap, setFillingGap] = useState(false);
-  function mergeReplies(...groups) {
-    return [...new Map(groups.flat().map((r) => [r.id, r])).values()].sort(
-      (a, b) => a.id - b.id,
-    );
-  }
   async function load(latest = false) {
     const version = ++sequence.current;
+    const requested = route().params;
+    const requestedPage = requested.get("page");
+    const requestedReply = requested.get("reply");
     try {
-      const t = await board("read_topic", { topic: id });
-      if (!latest && reply && !t.replies.some((r) => String(r.id) === reply)) {
-        const linked = await board("read_topic", {
-          topic: id,
-          reply: Number(reply),
-        });
-        const newestStart = t.replies[0]?.id;
-        const linkedEnd = linked.replies.at(-1)?.id;
-        t.linkGap =
-          newestStart && linkedEnd && newestStart > linkedEnd
-            ? { before: newestStart, after: linkedEnd }
-            : null;
-        t.replies = mergeReplies(linked.replies, t.replies);
-        t.nextCursor = linked.nextCursor;
-      }
-      if (version === sequence.current) {
+      const t = await board("read_topic", {
+        topic: id,
+        page: latest ? 0 : page,
+        ...(!latest && reply ? { reply: Number(reply) } : {}),
+      });
+      const location = route();
+      if (
+        version === sequence.current &&
+        location.params.get("page") === requestedPage &&
+        location.params.get("reply") === requestedReply
+      ) {
         setTopic(t);
         setError(null);
+        const current = route();
+        if (
+          current.page === "topics" &&
+          Number(current.params.get("topic")) === id &&
+          current.params.get("page") !== String(t.page)
+        ) {
+          history.replaceState(
+            null,
+            "",
+            href("topics", {
+              ...Object.fromEntries(current.params),
+              page: t.page,
+            }),
+          );
+          window.dispatchEvent(new HashChangeEvent("hashchange"));
+        }
       }
     } catch (e) {
       if (version === sequence.current) setError(e);
@@ -413,7 +435,14 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
   useEffect(() => {
     load();
     return () => sequence.current++;
-  }, [id, reply, app.revision]);
+  }, [id, reply, page, app.revision]);
+  useEffect(() => {
+    if (topic && scrolledPage.current !== topic.page) {
+      scrolledPage.current = topic.page;
+      if (!reply && !sentReply.current && scroll.current)
+        scroll.current.scrollTop = 0;
+    }
+  }, [topic, reply]);
   useEffect(() => {
     if (!reply) scrolledReply.current = null;
     if (reply && topic && scrolledReply.current !== reply) {
@@ -444,49 +473,70 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
       setError(e);
     }
   }
-  async function fillGap() {
-    if (fillingGap || !topic.linkGap) return;
-    const version = sequence.current;
-    const gap = topic.linkGap;
-    setFillingGap(true);
-    try {
-      const page = await board("read_topic", { topic: id, before: gap.before });
-      if (version !== sequence.current) return;
-      setTopic((t) => {
-        if (t.linkGap?.before !== gap.before) return t;
-        const start = page.replies[0]?.id;
-        return {
-          ...t,
-          replies: mergeReplies(
-            t.replies,
-            page.replies.filter((r) => r.id > gap.after),
-          ),
-          linkGap:
-            start > gap.after && page.nextCursor
-              ? { ...gap, before: start }
-              : null,
-        };
-      });
-    } catch (e) {
-      if (version === sequence.current) setError(e);
-    } finally {
-      setFillingGap(false);
-    }
+  function pageHref(number) {
+    return href("topics", {
+      ...Object.fromEntries(route().params),
+      page: number,
+      reply: null,
+    });
   }
-  async function earlier() {
-    try {
-      const older = await board("read_topic", {
-        topic: id,
-        before: topic.nextCursor,
-      });
-      setTopic((t) => ({
-        ...t,
-        replies: [...older.replies, ...t.replies],
-        nextCursor: older.nextCursor,
-      }));
-    } catch (e) {
-      setError(e);
-    }
+  function pagination(position) {
+    if (!topic) return null;
+    const numbers = [
+      ...new Set([
+        1,
+        ...Array.from({ length: 5 }, (_, i) => topic.page + i - 2),
+        topic.pageCount,
+      ]),
+    ]
+      .filter((n) => n >= 1 && n <= topic.pageCount)
+      .sort((a, b) => a - b);
+    return (
+      <nav
+        className="reply-pagination"
+        aria-label={"Reply pages (" + position + ")"}
+      >
+        <p>
+          Page {topic.page} of {topic.pageCount} · {topic.replyCount} replies
+        </p>
+        <div>
+          {topic.page > 1 ? (
+            <>
+              <a href={pageHref(1)}>First</a>
+              <a href={pageHref(topic.page - 1)}>Previous</a>
+            </>
+          ) : (
+            <>
+              <span aria-disabled="true">First</span>
+              <span aria-disabled="true">Previous</span>
+            </>
+          )}
+          {numbers.map((n, i) => (
+            <React.Fragment key={n}>
+              {i > 0 && n > numbers[i - 1] + 1 && <span>…</span>}
+              <a
+                href={pageHref(n)}
+                aria-label={"Page " + n}
+                aria-current={n === topic.page ? "page" : undefined}
+              >
+                {n}
+              </a>
+            </React.Fragment>
+          ))}
+          {topic.page < topic.pageCount ? (
+            <>
+              <a href={pageHref(topic.page + 1)}>Next</a>
+              <a href={pageHref(topic.pageCount)}>Latest</a>
+            </>
+          ) : (
+            <>
+              <span aria-disabled="true">Next</span>
+              <span aria-disabled="true">Latest</span>
+            </>
+          )}
+        </div>
+      </nav>
+    );
   }
   return (
     <section className="topic-detail" aria-label="Topic details" ref={scroll}>
@@ -584,11 +634,12 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
           </article>
           {reply && (
             <p className="notice">
-              Linked reply highlighted. Latest replies are also shown.{" "}
+              Linked reply highlighted on this page.{" "}
               <a
                 href={href("topics", {
                   ...Object.fromEntries(route().params),
                   reply: null,
+                  page: topic.pageCount,
                 })}
               >
                 Show latest replies
@@ -604,40 +655,25 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
           )}
           <div className="replies-heading">
             <h3>Replies</h3>
-            {topic.nextCursor && (
-              <button onClick={earlier}>Load earlier replies</button>
-            )}
           </div>
-          {topic.replies.map((r, index) => (
-            <React.Fragment key={r.id}>
-              {topic.linkGap &&
-                r.id >= topic.linkGap.before &&
-                (index === 0 ||
-                  topic.replies[index - 1].id < topic.linkGap.before) && (
-                  <p className="notice">
-                    Some replies between the linked message and latest replies
-                    aren't loaded.{" "}
-                    <button disabled={fillingGap} onClick={fillGap}>
-                      {fillingGap ? "Loading replies…" : "Load replies between"}
-                    </button>
-                  </p>
-                )}
-              <article
-                className={
-                  "post" + (String(r.id) === reply ? " search-focus" : "")
-                }
-                id={"reply-" + r.id}
-                key={r.id}
-              >
-                <div className="post-by">
-                  <Person id={r.author} />
-                  <time>{new Date(r.createdAt * 1000).toLocaleString()}</time>
-                </div>
-                <RichText text={r.body} />
-                <Attachments files={r.attachments} />
-              </article>
-            </React.Fragment>
+          {pagination("top")}
+          {topic.replies.map((r) => (
+            <article
+              className={
+                "post" + (String(r.id) === reply ? " search-focus" : "")
+              }
+              id={"reply-" + r.id}
+              key={r.id}
+            >
+              <div className="post-by">
+                <Person id={r.author} />
+                <time>{new Date(r.createdAt * 1000).toLocaleString()}</time>
+              </div>
+              <RichText text={r.body} />
+              <Attachments files={r.attachments} />
+            </article>
           ))}
+          {pagination("bottom")}
           <Composer
             draftKey={`reply:${id}`}
             label="Reply"
@@ -656,6 +692,7 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
                 navigate("topics", {
                   ...Object.fromEntries(current.params),
                   reply: null,
+                  page: null,
                 });
                 await load(true);
               }

@@ -2046,3 +2046,31 @@ mark {
   border-radius: 10px;
   background: #203425;
 }
+
+.reply-pagination {
+  margin: 16px 0;
+}
+.reply-pagination > p {
+  color: var(--muted);
+  font-size: 12px;
+}
+.reply-pagination > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.reply-pagination a,
+.reply-pagination span[aria-disabled] {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.reply-pagination a[aria-current] {
+  background: var(--accent);
+  color: var(--ink);
+}
+.reply-pagination span[aria-disabled] {
+  color: var(--muted);
+  opacity: 0.5;
+}

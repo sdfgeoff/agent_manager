@@ -530,18 +530,49 @@ impl Store {
                 } else {
                     p["before"].as_i64().unwrap_or(i64::MAX)
                 };
-                let rows=tx.prepare("SELECT id,author,body,created_at FROM board_replies WHERE topic=?1 AND id<?2 ORDER BY id DESC LIMIT 101")?.query_map(params![id,before],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"author":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?,"createdAt":r.get::<_,i64>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                let more = rows.len() > 100;
-                let mut rows = rows.into_iter().take(100).collect::<Vec<_>>();
+                let mut rows = if let Some(requested) = p["page"].as_i64() {
+                    ensure!(requested >= 0, "Page must be zero (latest) or positive");
+                    let count: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM board_replies WHERE topic=?1",
+                        [id],
+                        |r| r.get(0),
+                    )?;
+                    let pages = ((count + 19) / 20).max(1);
+                    let selected = if let Some(reply) = p["reply"].as_i64() {
+                        let prior: i64 = tx.query_row(
+                            "SELECT COUNT(*) FROM board_replies WHERE topic=?1 AND id<?2",
+                            params![id, reply],
+                            |r| r.get(0),
+                        )?;
+                        prior / 20 + 1
+                    } else if requested == 0 {
+                        pages
+                    } else {
+                        requested.min(pages)
+                    };
+                    t["page"] = json!(selected);
+                    t["pageCount"] = json!(pages);
+                    t["replyCount"] = json!(count);
+                    t["pageSize"] = json!(20);
+                    t["nextCursor"] = Value::Null;
+                    tx.prepare("SELECT id,author,body,created_at FROM board_replies WHERE topic=?1 ORDER BY id ASC LIMIT 20 OFFSET ?2")?
+                        .query_map(params![id,(selected-1)*20],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"author":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?,"createdAt":r.get::<_,i64>(3)?})))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                } else {
+                    let rows=tx.prepare("SELECT id,author,body,created_at FROM board_replies WHERE topic=?1 AND id<?2 ORDER BY id DESC LIMIT 101")?.query_map(params![id,before],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"author":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?,"createdAt":r.get::<_,i64>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                    let more = rows.len() > 100;
+                    let mut rows = rows.into_iter().take(100).collect::<Vec<_>>();
+                    rows.reverse();
+                    t["nextCursor"] = if more {
+                        rows.first().map(|r| r["id"].clone()).unwrap_or(Value::Null)
+                    } else {
+                        Value::Null
+                    };
+                    rows
+                };
                 for r in &mut rows {
                     r["attachments"] = json!(attachments(&tx, id, r["id"].as_i64())?);
                 }
-                rows.reverse();
-                t["nextCursor"] = if more {
-                    rows.first().map(|r| r["id"].clone()).unwrap_or(Value::Null)
-                } else {
-                    Value::Null
-                };
                 t["replies"] = json!(rows);
                 t["attachments"] = json!(attachments(&tx, id, None)?);
                 t["subscribed"]=json!(tx.query_row("SELECT subscribed FROM board_subscriptions WHERE actor=?1 AND kind='topic' AND target=?2",params![actor.id,id],|r|r.get::<_,bool>(0)).optional()?.unwrap_or(false));
@@ -1130,6 +1161,96 @@ mod tests {
             .unwrap();
         assert_eq!(filtered["data"].as_array().unwrap().len(), 1);
         assert_eq!(filtered["data"][0]["id"], 1);
+    }
+
+    #[test]
+    fn numbered_pages_are_stable_and_reply_links_resolve_their_page() {
+        let (_dir, s, a, _) = setup();
+        let t = s
+            .board(&a, "create_topic", &json!({"channel":1,"body":"Opening"}))
+            .unwrap();
+        let id = t["id"].as_i64().unwrap();
+        let empty = s
+            .board(&a, "read_topic", &json!({"topic":id,"page":0}))
+            .unwrap();
+        assert_eq!(empty["page"], 1);
+        assert_eq!(empty["pageCount"], 1);
+        assert_eq!(empty["replyCount"], 0);
+        let mut replies = Vec::new();
+        for n in 0..41 {
+            replies.push(
+                s.board(
+                    &a,
+                    "post_reply",
+                    &json!({"topic":id,"body":format!("Reply {n}")}),
+                )
+                .unwrap()["id"]
+                    .as_i64()
+                    .unwrap(),
+            );
+        }
+        let first = s
+            .board(&a, "read_topic", &json!({"topic":id,"page":1}))
+            .unwrap();
+        assert_eq!(first["replies"].as_array().unwrap().len(), 20);
+        assert_eq!(first["replies"][0]["id"], replies[0]);
+        assert_eq!(first["replies"][19]["id"], replies[19]);
+        let second = s
+            .board(&a, "read_topic", &json!({"topic":id,"page":2}))
+            .unwrap();
+        assert_eq!(second["replies"].as_array().unwrap().len(), 20);
+        assert_eq!(second["replies"][0]["id"], replies[20]);
+        let latest = s
+            .board(&a, "read_topic", &json!({"topic":id,"page":0}))
+            .unwrap();
+        assert_eq!(latest["page"], 3);
+        assert_eq!(latest["pageCount"], 3);
+        assert_eq!(latest["replies"].as_array().unwrap().len(), 1);
+        let linked = s
+            .board(
+                &a,
+                "read_topic",
+                &json!({"topic":id,"page":0,"reply":replies[20]}),
+            )
+            .unwrap();
+        assert_eq!(linked["page"], 2);
+        assert_eq!(linked["replies"][19]["id"], replies[39]);
+        s.board(&a, "post_reply", &json!({"topic":id,"body":"New reply"}))
+            .unwrap();
+        assert_eq!(
+            s.board(&a, "read_topic", &json!({"topic":id,"page":1}))
+                .unwrap()["replies"],
+            first["replies"]
+        );
+        assert_eq!(
+            s.board(&a, "read_topic", &json!({"topic":id,"page":999}))
+                .unwrap()["page"],
+            3
+        );
+        assert!(
+            s.board(&a, "read_topic", &json!({"topic":id,"page":-1}))
+                .is_err()
+        );
+        let other = s
+            .board(&a, "create_topic", &json!({"channel":1,"body":"Other"}))
+            .unwrap();
+        assert!(
+            s.board(
+                &a,
+                "read_topic",
+                &json!({"topic":other["id"],"page":0,"reply":replies[0]})
+            )
+            .is_err()
+        );
+        // Legacy cursor clients retain their existing behavior.
+        assert_eq!(
+            s.board(&a, "read_topic", &json!({"topic":id,"reply":replies[0]}))
+                .unwrap()["replies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
