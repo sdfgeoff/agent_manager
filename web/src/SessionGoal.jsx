@@ -173,7 +173,10 @@ export default function SessionGoal({
                 mutate("thread/goal/set", {
                   status: goal.status === "active" ? "paused" : "active",
                   ...(goal.status === "complete"
-                    ? { objective: goal.objective }
+                    ? {
+                        objective: goal.objective,
+                        tokenBudget: goal.tokenBudget ?? null,
+                      }
                     : {}),
                 })
               }

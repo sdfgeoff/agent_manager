@@ -61,6 +61,16 @@ async fn goals_preserve_usage_and_agent_pause_restores_only_unchanged_goals() {
         .to_string()
         .contains("Agent is paused")
     );
+    assert!(
+        call(
+            "thread/goal/set",
+            json!({"threadId":thread,"objective":"Implicit active replacement"})
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("Agent is paused")
+    );
     // An explicit pause in the goal controls overrides the agent's restore intent.
     call(
         "thread/goal/set",

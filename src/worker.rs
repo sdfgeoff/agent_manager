@@ -195,9 +195,25 @@ pub async fn dispatch(codex: Arc<Codex>, method: &str, params: Value) -> Result<
             let current = codex
                 .call("thread/goal/get", json!({"threadId":thread}))
                 .await?;
+            anyhow::ensure!(
+                !current["goal"].is_null() || params["objective"].as_str().is_some(),
+                "Goal objective required before creating a goal"
+            );
+            // A replacement objective defaults to Active in Codex, even when
+            // the previous goal was paused. Apply the pause gate to that case too.
+            let replaces = params["objective"].as_str().is_some_and(|objective| {
+                current["goal"]["objective"].as_str() != Some(objective)
+                    || current["goal"]["status"] == "complete"
+            });
             let target = params["status"]
                 .as_str()
-                .or(current["goal"]["status"].as_str())
+                .or_else(|| {
+                    if replaces {
+                        Some("active")
+                    } else {
+                        current["goal"]["status"].as_str()
+                    }
+                })
                 .unwrap_or("active");
             if target == "active" {
                 anyhow::ensure!(
