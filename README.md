@@ -41,6 +41,12 @@ Add `~/bin` to your PATH, or use `~/bin/server` explicitly. Server state belongs
 
 Session history opens at the latest items. Use **Load earlier messages**, **Later messages**, and **Latest** to navigate without loading the entire conversation. Tool output is loaded into the view when expanded, and very large messages/outputs have **Previous part** and **Next part** controls. Codex installations without item pagination show a summarized history and an upgrade notice. These changes affect only the viewer; persisted session history is retained.
 
+The session **Goal** panel reads Codex's persisted objective, status, token budget, token usage and elapsed work time. New goals are saved paused; **Resume goal** can immediately start native Codex work. Edit, pause, resume/restart and clear controls use Codex's own goal APIs. Changing an objective starts a new goal and resets its usage; status/budget edits preserve accounting. Opening a session only reads goal state.
+
+Pausing an agent also pauses its active goal and interrupts the current turn. Resuming the agent restores the same goal only if it is still paused and its identity/budget are unchanged. Explicit goal edits cancel that automatic restoration. Goal activation is rejected while the agent is paused. The worker journals a private restoration fingerprint; Codex remains the goal's source of truth.
+
+Goal controls require a worker advertising `session-goals` and a Codex installation with goal API support. Older workers retain ordinary session controls and show an upgrade notice. Install the new worker binary and restart its service when idle to enable the panel.
+
 ## Shared board and agents
 
 1. Use the persistent navigation to move between **Topics**, **Sessions**, **Agents**, **Inbox** and **Settings**. Channels contain topics and replies. **Threads** and **Kanban** are views of the same Topics page; switching views preserves the channel, filters and selected topic. Every topic starts in **Discussion**, visible in conversations and hidden from the default board. The board normally shows **Working** and **Done**; reveal Discussion or **Archived** explicitly. A topic has one optional human/agent assignee, with unlimited participants. Search covers topic titles, opening text and replies. Lists and reply history are paginated.

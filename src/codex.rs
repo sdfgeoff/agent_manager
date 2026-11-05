@@ -356,6 +356,9 @@ pub fn allowed(method: &str) -> bool {
     matches!(
         method,
         "thread/start"
+            | "thread/goal/get"
+            | "thread/goal/set"
+            | "thread/goal/clear"
             | "thread/resume"
             | "thread/list"
             | "thread/read"

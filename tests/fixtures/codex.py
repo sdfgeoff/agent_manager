@@ -116,6 +116,33 @@ for line in sys.stdin:
     elif method == 'thread/name/set':
         threads[params['threadId']]['name'] = params['name']
         save()
+    elif method == 'thread/goal/get':
+        result = {'goal': threads[params['threadId']].get('goal')}
+    elif method == 'thread/goal/set':
+        thread = threads[params['threadId']]
+        old = thread.get('goal')
+        objective = params.get('objective') or (old or {}).get('objective')
+        if not objective or len(objective) > 4000:
+            send({'id':request_id,'error':{'code':-32600,'message':'Goal objective required'}})
+            continue
+        if not old or objective != old['objective'] or old['status'] == 'complete' and params.get('objective'):
+            goal = {'threadId':params['threadId'],'objective':objective,'status':'active','tokenBudget':None,'tokensUsed':0,'timeUsedSeconds':0,'createdAt':len(Path(sys.argv[0]).with_suffix('.calls.jsonl').read_text()),'updatedAt':1}
+        else:
+            goal = dict(old)
+        if 'tokenBudget' in params:
+            goal['tokenBudget'] = params['tokenBudget']
+        if params.get('status'):
+            goal['status'] = params['status']
+        thread['goal'] = goal
+        save()
+        result = {'goal':goal}
+        event('thread/goal/updated',{'threadId':params['threadId'],'goal':goal})
+    elif method == 'thread/goal/clear':
+        thread = threads[params['threadId']]
+        cleared = thread.pop('goal', None) is not None
+        save()
+        result = {'cleared':cleared}
+        event('thread/goal/cleared',{'threadId':params['threadId']})
     elif method == 'thread/items/list':
         items = [{'turnId': turn['id'], 'item': item} for turn in threads[params['threadId']]['turns'] for item in turn['items']]
         if params.get('sortDirection') == 'desc':

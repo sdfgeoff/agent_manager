@@ -185,6 +185,46 @@ pub async fn dispatch(codex: Arc<Codex>, method: &str, params: Value) -> Result<
         );
     }
     let thread = params["threadId"].as_str().unwrap_or("");
+    if matches!(method, "thread/goal/set" | "thread/goal/clear") {
+        anyhow::ensure!(!thread.is_empty(), "Session id required");
+        let _guard = codex.agents.thread_gate(thread).lock_owned().await;
+        let mut params = params.clone();
+        params["origin"] = json!("user");
+        if method == "thread/goal/set" {
+            crate::goals::validate_change(&params)?;
+            let current = codex
+                .call("thread/goal/get", json!({"threadId":thread}))
+                .await?;
+            let target = params["status"]
+                .as_str()
+                .or(current["goal"]["status"].as_str())
+                .unwrap_or("active");
+            if target == "active" {
+                anyhow::ensure!(
+                    !codex.agents.paused(thread),
+                    "Agent is paused; resume it from Agents before activating its goal"
+                );
+                if codex.agents.bound(thread) {
+                    codex.agents.prepare_manual(&codex, thread).await?;
+                } else if codex.status()["active"][thread].is_null() {
+                    codex
+                        .call(
+                            "thread/resume",
+                            json!({"threadId":thread,"excludeTurns":true}),
+                        )
+                        .await?;
+                }
+            }
+        }
+        // Explicit goal controls supersede a prior agent-pause restore intent,
+        // including an ambiguous transport failure after Codex accepted a change.
+        codex.agents.goal_changed(thread, false)?;
+        let result = codex.call(method, params).await?;
+        if result["goal"]["status"] == "active" {
+            codex.agents.goal_changed(thread, true)?;
+        }
+        return Ok(result);
+    }
     if codex.agents.bound(thread)
         && matches!(
             method,
@@ -225,6 +265,7 @@ fn status(codex: &Codex) -> Value {
         "board-agents",
         "session-search",
         "server-tools",
+        "session-goals",
         "token-usage"
     ]);
     status["workerVersion"] = json!(env!("CARGO_PKG_VERSION"));

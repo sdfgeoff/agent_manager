@@ -5,6 +5,166 @@ use serde_json::json;
 use std::{os::unix::fs::PermissionsExt, time::Duration};
 
 #[tokio::test]
+async fn goals_preserve_usage_and_agent_pause_restores_only_unchanged_goals() {
+    let dir = test_support::tempdir();
+    let binary = dir.path().join("codex-goals");
+    std::fs::write(&binary, include_str!("fixtures/codex.py")).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let catalog = dir.path().join("catalog.json");
+    let codex = Codex::spawn_managed(binary.to_str().unwrap(), Some(catalog.clone()))
+        .await
+        .unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let result=worker::dispatch(codex.clone(),"manager/agent/register",json!({"id":id,"host":"http://127.0.0.1:1","token":"fixture-only-token","cwd":dir.path(),"persona":"Persistent goal persona","settings":{}})).await.unwrap();
+    let thread = result["thread"].as_str().unwrap().to_owned();
+    let call = |method: &'static str, params: serde_json::Value| {
+        worker::dispatch(codex.clone(), method, params)
+    };
+    let goal=call("thread/goal/set",json!({"threadId":thread,"objective":"Test persistent goal","status":"active","tokenBudget":1000})).await.unwrap()["goal"].clone();
+    let before = std::fs::read_to_string(binary.with_extension("calls.jsonl")).unwrap();
+    assert!(
+        call(
+            "thread/goal/set",
+            json!({"threadId":thread,"status":"active","tokenBudget":-1})
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(binary.with_extension("calls.jsonl")).unwrap(),
+        before,
+        "invalid goal changes must not resume or mutate a session"
+    );
+
+    call(
+        "turn/start",
+        json!({"threadId":thread,"input":[{"type":"text","text":"Fixture activity"}]}),
+    )
+    .await
+    .unwrap();
+    call("manager/agent/configure", json!({"id":id,"paused":true}))
+        .await
+        .unwrap();
+    assert_eq!(
+        call("thread/goal/get", json!({"threadId":thread}))
+            .await
+            .unwrap()["goal"]["status"],
+        "paused"
+    );
+    assert!(
+        call(
+            "thread/goal/set",
+            json!({"threadId":thread,"status":"active"})
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("Agent is paused")
+    );
+    // An explicit pause in the goal controls overrides the agent's restore intent.
+    call(
+        "thread/goal/set",
+        json!({"threadId":thread,"status":"paused"}),
+    )
+    .await
+    .unwrap();
+    call("manager/agent/configure", json!({"id":id,"paused":false}))
+        .await
+        .unwrap();
+    assert_eq!(
+        call("thread/goal/get", json!({"threadId":thread}))
+            .await
+            .unwrap()["goal"]["status"],
+        "paused"
+    );
+    call(
+        "thread/goal/set",
+        json!({"threadId":thread,"status":"active"}),
+    )
+    .await
+    .unwrap();
+    call("manager/agent/configure", json!({"id":id,"paused":true}))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    // Re-open the persistent binding to exercise recovery after a worker restart.
+    let recovered = agentmanager::agent_runtime::AgentRuntime::open(Some(&catalog)).unwrap();
+    recovered
+        .dispatch(
+            &codex,
+            "manager/agent/configure",
+            json!({"id":id,"paused":false}),
+        )
+        .await
+        .unwrap();
+    let resumed = call("thread/goal/get", json!({"threadId":thread}))
+        .await
+        .unwrap()["goal"]
+        .clone();
+    assert_eq!(resumed["status"], "active");
+    assert_eq!(resumed["createdAt"], goal["createdAt"]);
+    assert_eq!(resumed["tokensUsed"], goal["tokensUsed"]);
+    // Use the recovered runtime consistently; explicit goal edits cancel its restore marker.
+    recovered
+        .dispatch(
+            &codex,
+            "manager/agent/configure",
+            json!({"id":id,"paused":true}),
+        )
+        .await
+        .unwrap();
+    codex
+        .call(
+            "thread/goal/set",
+            json!({"threadId":thread,"objective":"Edited goal","status":"paused","origin":"user"}),
+        )
+        .await
+        .unwrap();
+    recovered
+        .dispatch(
+            &codex,
+            "manager/agent/configure",
+            json!({"id":id,"paused":false}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        call("thread/goal/get", json!({"threadId":thread}))
+            .await
+            .unwrap()["goal"]["status"],
+        "paused",
+        "changed goals must not be reactivated"
+    );
+    call("thread/goal/clear", json!({"threadId":thread}))
+        .await
+        .unwrap();
+    assert!(
+        call("thread/goal/get", json!({"threadId":thread}))
+            .await
+            .unwrap()["goal"]
+            .is_null()
+    );
+    let calls = std::fs::read_to_string(binary.with_extension("calls.jsonl")).unwrap();
+    let calls = calls
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|v| v["method"] == "thread/start")
+            .count(),
+        1
+    );
+    assert!(
+        calls
+            .iter()
+            .filter(|v| v["method"] == "thread/goal/set" || v["method"] == "thread/goal/clear")
+            .all(|v| v["params"]["origin"] == "user")
+    );
+}
+
+#[tokio::test]
 async fn discovery_spans_cli_and_desktop_folders_and_keeps_empty_managed_sessions() {
     let dir = test_support::tempdir();
     let binary = dir.path().join("codex-test");
@@ -169,7 +329,7 @@ async fn installed_codex_session_lifecycle() {
     std::fs::write(&binary,"#!/usr/bin/env python3\nimport os,sys\nos.environ['CODEX_HOME']=sys.argv[0]+'.home'\nos.makedirs(os.environ['CODEX_HOME'],exist_ok=True)\nos.execvp('codex',['codex',*sys.argv[1:]])\n").unwrap();
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
     let codex = Codex::spawn(binary.to_str().unwrap()).await.unwrap();
-    let started=codex.call("thread/start",json!({"cwd":dir.path(),"sandbox":"read-only","approvalPolicy":"on-request","config":{"model_reasoning_effort":"medium"}})).await.unwrap();
+    let started=codex.call("thread/start",json!({"cwd":dir.path(),"sandbox":"read-only","approvalPolicy":"on-request","config":{"model_reasoning_effort":"medium","features.goals":true}})).await.unwrap();
     let id = started["thread"]["id"].as_str().unwrap();
     codex
         .call(
@@ -202,6 +362,33 @@ async fn installed_codex_session_lifecycle() {
         .await
         .unwrap();
     assert!(history["data"].as_array().unwrap().is_empty());
+    assert!(
+        worker::dispatch(codex.clone(), "thread/goal/get", json!({"threadId":id}))
+            .await
+            .unwrap()["goal"]
+            .is_null()
+    );
+    let goal=worker::dispatch(codex.clone(),"thread/goal/set",json!({"threadId":id,"objective":"Native paused goal fixture","status":"paused","tokenBudget":1000})).await.unwrap()["goal"].clone();
+    assert_eq!(goal["status"], "paused");
+    let edited = worker::dispatch(
+        codex.clone(),
+        "thread/goal/set",
+        json!({"threadId":id,"tokenBudget":null}),
+    )
+    .await
+    .unwrap()["goal"]
+        .clone();
+    assert!(edited["tokenBudget"].is_null());
+    assert_eq!(edited["createdAt"], goal["createdAt"]);
+    worker::dispatch(codex.clone(), "thread/goal/clear", json!({"threadId":id}))
+        .await
+        .unwrap();
+    assert!(
+        worker::dispatch(codex, "thread/goal/get", json!({"threadId":id}))
+            .await
+            .unwrap()["goal"]
+            .is_null()
+    );
 }
 
 #[tokio::test]

@@ -4,6 +4,7 @@ pub mod board;
 pub mod board_api;
 pub mod catalog;
 pub mod codex;
+pub mod goals;
 pub mod mcp;
 pub mod mcp_catalog;
 pub mod push;

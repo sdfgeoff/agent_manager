@@ -24,6 +24,8 @@ struct LocalAgent {
     in_flight: bool,
     #[serde(default)]
     recover_after_pause: bool,
+    #[serde(default)]
+    suspended_goal: Option<crate::goals::Identity>,
 }
 pub struct AgentRuntime {
     path: Option<PathBuf>,
@@ -225,6 +227,61 @@ impl AgentRuntime {
         }
         Ok(())
     }
+    pub fn goal_changed(&self, thread: &str, activated: bool) -> Result<()> {
+        let id = self.agent_id(thread);
+        if let Some(id) = id {
+            self.mutate(&id, |a| {
+                a.suspended_goal = None;
+                if activated {
+                    a.recover_after_pause = false;
+                }
+            })?;
+        }
+        Ok(())
+    }
+    async fn synchronize_goal_pause(&self, codex: &Arc<Codex>, a: &LocalAgent) -> Result<()> {
+        if !a.paused && a.suspended_goal.is_none() {
+            return Ok(());
+        }
+        let goal = crate::goals::read_optional(codex, &a.thread).await?;
+        if a.paused {
+            if let Some(goal) = goal.filter(|g| g["status"] == "active") {
+                // Journal before the remote mutation so a crash cannot lose restoration intent.
+                self.mutate(&a.id, |a| {
+                    a.suspended_goal = Some(crate::goals::Identity::from_goal(&goal))
+                })?;
+                codex
+                    .call(
+                        "thread/goal/set",
+                        json!({"threadId":a.thread,"status":"paused","origin":"user"}),
+                    )
+                    .await?;
+            }
+        } else if let Some(identity) = &a.suspended_goal {
+            if goal
+                .as_ref()
+                .is_some_and(|g| g["status"] == "paused" && identity.matches(g))
+            {
+                if !codex.status()["active"][&a.thread].is_null() {
+                    return Ok(());
+                }
+                // Apply the latest persona/MCP before native goal activation can start a turn.
+                self.resume(codex, a).await?;
+                self.mutate(&a.id, |a| {
+                    a.in_flight = false;
+                    a.recover_after_pause = false;
+                })?;
+                codex
+                    .call(
+                        "thread/goal/set",
+                        json!({"threadId":a.thread,"status":"active","origin":"user"}),
+                    )
+                    .await?;
+            }
+            self.mutate(&a.id, |a| a.suspended_goal = None)?;
+        }
+        Ok(())
+    }
     pub async fn dispatch(&self, codex: &Arc<Codex>, method: &str, p: Value) -> Result<Value> {
         let id = p["id"].as_str().context("Agent id required")?.to_owned();
         ensure!(uuid::Uuid::parse_str(&id).is_ok(), "Invalid agent id");
@@ -318,6 +375,7 @@ impl AgentRuntime {
                     accepted: VecDeque::new(),
                     in_flight: false,
                     recover_after_pause: false,
+                    suspended_goal: None,
                 };
                 params["config"] = self.config(&provisional)?;
                 let result = codex.call("thread/start", params).await?;
@@ -342,6 +400,7 @@ impl AgentRuntime {
                 accepted: VecDeque::new(),
                 in_flight: false,
                 recover_after_pause: false,
+                suspended_goal: None,
             };
             // Save the binding before any operation that can fail. Never allocate a replacement.
             self.save(a.clone())?;
@@ -375,6 +434,21 @@ impl AgentRuntime {
                     a.settings = p["settings"].clone();
                 }
             })?;
+            let goal_result = if a.paused {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    self.synchronize_goal_pause(codex, &a),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!(
+                        "Goal pause timed out; the current turn will still be interrupted"
+                    )),
+                }
+            } else {
+                self.synchronize_goal_pause(codex, &a).await
+            };
             if a.paused
                 && let Some(turn) = codex.status()["active"][&a.thread].as_str()
             {
@@ -382,6 +456,7 @@ impl AgentRuntime {
                     .call("turn/interrupt", json!({"threadId":a.thread,"turnId":turn}))
                     .await?;
             }
+            goal_result?;
             return Ok(json!({"ok":true}));
         }
         if method == "manager/agent/deliver" {

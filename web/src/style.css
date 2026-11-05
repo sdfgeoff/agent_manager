@@ -2074,3 +2074,37 @@ mark {
   color: var(--muted);
   opacity: 0.5;
 }
+.goal-panel {
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  max-height: 40vh;
+  overflow: auto;
+  font-size: 12px;
+}
+.goal-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.goal-heading strong {
+  margin-right: auto;
+}
+.goal-objective {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 10px 0;
+}
+.goal-panel form {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+.goal-panel textarea {
+  width: 100%;
+}
+.goal-panel p {
+  margin-bottom: 6px;
+}
+

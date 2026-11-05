@@ -23,6 +23,7 @@ import {
   LIVE_ITEM_LIMIT,
   TEXT_PAGE_SIZE,
 } from "./sessionHistory";
+import SessionGoal from "./SessionGoal";
 export default function Sessions({ params }) {
   const app = useApp();
   const worker =
@@ -649,6 +650,13 @@ export default function Sessions({ params }) {
           </div>
         ) : (
           <>
+            <SessionGoal
+              key={`${worker}/${threadId}`}
+              worker={selectedWorker}
+              threadId={threadId}
+              agentPaused={agent?.paused}
+              onChanged={loadStatus}
+            />
             {searchText && (
               <div className="session-search-notice">
                 Search: <strong>{searchText}</strong> ·{" "}
