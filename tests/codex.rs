@@ -765,7 +765,12 @@ async fn usage_is_recorded_without_browser_subscribers_and_survives_restart() {
             let page = worker::dispatch(codex.clone(), "manager/usage", json!({"agentId":agent}))
                 .await
                 .unwrap();
-            if page["totals"]["totalTokens"] == 240 {
+            // Usage events precede the approval request; wait for both before responding.
+            if page["totals"]["totalTokens"] == 240
+                && codex.status()["requests"]
+                    .as_array()
+                    .is_some_and(|requests| requests.iter().any(|request| request["id"] == 100))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
