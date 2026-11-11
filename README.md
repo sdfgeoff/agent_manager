@@ -153,6 +153,9 @@ The push tests decrypt generated payloads, check VAPID-key persistence and exerc
 
 ## Sessions and reconnecting
 
+User and assistant messages render their complete Markdown, including long tables. Session history is paginated between messages, not within chat messages. Large tool output retains separate part controls and is rendered only when expanded.
+
+
 1. Tasks keep running when a browser closes, a phone sleeps, or the worker temporarily loses its server connection. Codex remains on the worker. Worker connections reconnect with backoff, and browsers reload history and outstanding approval requests after reconnecting.
 
 2. Chat, tool output, file changes, and approval requests stream to connected browsers. Send while a task is active to steer it, or press **Stop** to interrupt it. The first browser to answer an approval wins. Other pending requests have a JSON response fallback for protocol features without a dedicated form.

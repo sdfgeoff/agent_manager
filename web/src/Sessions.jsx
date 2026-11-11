@@ -831,7 +831,7 @@ export default function Sessions({ params }) {
     </section>
   );
 }
-function PagedSessionText({ text, markdown = false, searchText = "" }) {
+function PagedToolOutput({ text, searchText = "" }) {
   const [part, setPart] = useState(0);
   const count = Math.max(1, Math.ceil(text.length / TEXT_PAGE_SIZE));
   const selected = Math.min(part, count - 1);
@@ -848,11 +848,7 @@ function PagedSessionText({ text, markdown = false, searchText = "" }) {
   );
   return (
     <>
-      {count === 1 && markdown ? (
-        <RichText text={text} />
-      ) : (
-        <pre className="session-text">{excerpt}</pre>
-      )}
+      <pre className="session-text">{excerpt}</pre>
       {count > 1 && (
         <div className="text-navigation">
           <button
@@ -889,7 +885,7 @@ const SessionItem = React.memo(function SessionItem({ item, searchText }) {
         <div className="message-label">
           {item.type === "userMessage" ? "You" : "Codex"}
         </div>
-        <PagedSessionText text={text} markdown searchText={searchText} />
+        <RichText text={text} />
       </article>
     );
   }
@@ -908,7 +904,7 @@ const SessionItem = React.memo(function SessionItem({ item, searchText }) {
     >
       <summary>{String(title).slice(0, 300)}</summary>
       {open && (
-        <PagedSessionText
+        <PagedToolOutput
           text={String(
             item.aggregatedOutput ||
               item.output ||
