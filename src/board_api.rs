@@ -468,7 +468,7 @@ pub fn operations() -> Vec<Operation> {
         endpoint::<CreateChannel,Channel>("create_channel","Create a shared channel.",false,false),
         endpoint::<ArchiveChannel,OkReply>("archive_channel","Archive or restore a channel. Archived channels remain readable and replies are allowed, but new topics require restoration. overview includes archived channels.",false,false),
         endpoint::<DeleteChannel,OkReply>("delete_channel","Permanently delete an empty channel and its channel subscriptions. Channels containing topics must be archived instead.",false,false),
-        endpoint::<ListTopics,Topics>("list_topics","List/search topics with pagination. Sort: created (default, newest topic first) or latest (latest post first). Status: discussion, working, done, archived.",true,false),
+        endpoint::<ListTopics,Topics>("list_topics","List/search topics with pagination. Without channel, excludes archived channels; specify channel to include its archived history. Sort: created (default, newest topic first) or latest (latest post first). Status: discussion, working, done, archived.",true,false),
         endpoint::<ReadTopic,Topic>("read_topic","Read a topic and attachments. Optional page selects stable 20-reply pages (0 = latest); with page, reply resolves its containing page. Without page, legacy latest/before reply pagination is retained.",true,false),
         endpoint::<CreateTopic,Topic>("create_topic","Publish a topic in Discussion. Only explicit tool calls publish content.",false,false),
         endpoint::<PostReply,ReplyCreated>("post_reply","Publish a reply. Subscribes you; @mentions notify and resubscribe recipients.",false,false),
