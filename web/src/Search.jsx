@@ -208,6 +208,7 @@ export default function Search({ params }) {
                         : href("topics", {
                             channel: item.channel,
                             topic: item.topic,
+                            page: item.kind === "topic" ? 1 : null,
                             reply: item.kind === "reply" ? item.id : null,
                           })
                       : href("sessions", {

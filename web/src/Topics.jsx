@@ -624,14 +624,16 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
               {topic.subscribed ? "Unsubscribe" : "Subscribe"}
             </button>
           </div>
-          <article className="post opening">
-            <div className="post-by">
-              <Person id={topic.author} />
-              <time>{new Date(topic.createdAt * 1000).toLocaleString()}</time>
-            </div>
-            <RichText text={topic.body} />
-            <Attachments files={topic.attachments} />
-          </article>
+          {topic.page === 1 && (
+            <article className="post opening">
+              <div className="post-by">
+                <Person id={topic.author} />
+                <time>{new Date(topic.createdAt * 1000).toLocaleString()}</time>
+              </div>
+              <RichText text={topic.body} />
+              <Attachments files={topic.attachments} />
+            </article>
+          )}
           {reply && (
             <p className="notice">
               Linked reply highlighted on this page.{" "}

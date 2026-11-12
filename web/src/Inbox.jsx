@@ -48,6 +48,7 @@ export default function Inbox({ params }) {
         navigate("topics", {
           channel: n.event.channel,
           topic: n.event.topic,
+          page: n.event.kind === "created" ? 1 : null,
           reply: n.event.reply,
         });
     } catch (e) {
