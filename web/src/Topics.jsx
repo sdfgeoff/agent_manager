@@ -10,6 +10,7 @@ import {
   Archive,
   MessageSquare,
   ArrowLeft,
+  Settings,
 } from "lucide-react";
 import { board, href, navigate, route, authGuard } from "./api";
 import { useApp } from "./context";
@@ -23,7 +24,8 @@ import {
 } from "./components";
 export default function Topics({ params }) {
   const app = useApp();
-  const channel = Number(params.get("channel")) || app.channels[0]?.id;
+  const channel =
+    Number(params.get("channel")) || app.channels.find((c) => !c.archived)?.id;
   const view = params.get("view") === "kanban" ? "kanban" : "threads";
   const sort = params.get("sort") === "created" ? "created" : "latest";
   const search = params.get("search") || "";
@@ -36,6 +38,7 @@ export default function Topics({ params }) {
   const [cursor, setCursor] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [managingChannel, setManagingChannel] = useState(false);
   const composer = useRef(null);
   const [query, setQuery] = useState(search);
   const generation = useRef(0);
@@ -73,6 +76,12 @@ export default function Topics({ params }) {
   }, [query]);
   async function load(more = false) {
     const version = ++generation.current;
+    if (!channel) {
+      setData([]);
+      setCursor(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const result = await board("list_topics", {
@@ -180,14 +189,25 @@ export default function Topics({ params }) {
           <div className="page-heading">
             <div>
               <p className="eyebrow">SHARED WORKSPACE</p>
-              <h1>#{channelInfo?.name || "general"}</h1>
+              <h1>
+                {channelInfo
+                  ? `#${channelInfo.name}${channelInfo.archived ? " (archived)" : ""}`
+                  : "No active channels"}
+              </h1>
               <p>
                 {channelInfo?.description ||
                   "Conversations and work, together."}
               </p>
             </div>
             <div className="actions">
+              {channelInfo && (
+                <button onClick={() => setManagingChannel(true)}>
+                  <Settings size={16} />
+                  Channel settings
+                </button>
+              )}
               <button
+                disabled={!channelInfo}
                 onClick={subscribe}
                 title="Channel subscriptions notify you about new topics"
               >
@@ -202,6 +222,7 @@ export default function Topics({ params }) {
               </button>
               <button
                 className="primary"
+                disabled={!channelInfo || channelInfo.archived}
                 onClick={() =>
                   composer.current?.querySelector("textarea")?.focus()
                 }
@@ -339,25 +360,39 @@ export default function Topics({ params }) {
             </button>
           )}
         </div>
-        <div className="channel-composer" ref={composer}>
+        {channelInfo && !channelInfo.archived && (
+          <div className="channel-composer" ref={composer}>
+            <p className="field-hint">
+              New topic in #{channelInfo?.name || "general"}
+            </p>
+            <Composer
+              key={channel}
+              draftKey={`new-topic:${channel}`}
+              title
+              label="New topic message"
+              placeholder="Start a new topic… Type @ to mention someone."
+              buttonText="Post topic"
+              onSubmit={async (data) => {
+                const t = await board("create_topic", { ...data, channel });
+                patch({ topic: t.id });
+                app.changed();
+              }}
+            />
+          </div>
+        )}
+        {channelInfo?.archived && (
           <p className="field-hint">
-            New topic in #{channelInfo?.name || "general"}
+            This channel is archived. Existing topics remain accessible; restore
+            the channel to create topics.
           </p>
-          <Composer
-            key={channel}
-            draftKey={`new-topic:${channel}`}
-            title
-            label="New topic message"
-            placeholder="Start a new topic… Type @ to mention someone."
-            buttonText="Post topic"
-            onSubmit={async (data) => {
-              const t = await board("create_topic", { ...data, channel });
-              patch({ topic: t.id });
-              app.changed();
-            }}
-          />
-        </div>
+        )}
       </section>
+      {managingChannel && channelInfo && (
+        <ChannelSettings
+          channel={channelInfo}
+          onClose={() => setManagingChannel(false)}
+        />
+      )}
       {selected && (
         <TopicDetail
           key={selected}
@@ -368,6 +403,57 @@ export default function Topics({ params }) {
         />
       )}
     </div>
+  );
+}
+function ChannelSettings({ channel, onClose }) {
+  const app = useApp();
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  async function change(remove = false) {
+    if (
+      remove &&
+      !window.confirm(
+        `Permanently delete #${channel.name}? Only empty channels can be deleted.`,
+      )
+    )
+      return;
+    const guard = authGuard();
+    setBusy(true);
+    try {
+      await board(remove ? "delete_channel" : "archive_channel", {
+        channel: channel.id,
+        ...(remove ? {} : { archived: !channel.archived }),
+      });
+      guard();
+      await app.refresh();
+      guard();
+      if (remove || !channel.archived) navigate("topics");
+      app.changed();
+      onClose();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Modal title={`Channel settings: #${channel.name}`} onClose={onClose}>
+      <ErrorMessage error={error} />
+      <p>
+        Archive to hide this channel from the sidebar. Topics, replies and
+        existing links remain available. Restore it to create new topics.
+      </p>
+      <button disabled={busy} onClick={() => change()}>
+        {channel.archived ? "Restore channel" : "Archive channel"}
+      </button>
+      <p>
+        Permanent deletion is available only for empty channels and also removes
+        their channel subscriptions.
+      </p>
+      <button disabled={busy} onClick={() => change(true)}>
+        Delete empty channel
+      </button>
+    </Modal>
   );
 }
 function TopicDetail({ id, onClose, view, onViewChange }) {

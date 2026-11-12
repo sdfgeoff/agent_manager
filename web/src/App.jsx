@@ -48,6 +48,7 @@ export default function App() {
   const [error, setError] = useState(null);
   const [menu, setMenu] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState(false);
+  const [showArchivedChannels, setShowArchivedChannels] = useState(false);
   const [person, setPerson] = useState(null);
   const [authEpoch, setAuthEpoch] = useState(0);
   const presence = usePresence(me?.username, authEpoch + ":" + connectionEpoch);
@@ -245,7 +246,8 @@ export default function App() {
   if (current.page === "topics")
     lastTopics.current = Object.fromEntries(current.params);
   const activeChannel =
-    Number(current.params.get("channel")) || overview.channels[0]?.id;
+    Number(current.params.get("channel")) ||
+    overview.channels.find((c) => !c.archived)?.id;
   const pages = [
     ["activity", "Activity", ActivityIcon],
     ["usage", "Usage", ActivityIcon],
@@ -311,22 +313,39 @@ export default function App() {
                 <Plus size={16} />
               </button>
             </div>
-            {overview.channels.map((c) => (
-              <a
-                key={c.id}
-                href={href("topics", {
-                  channel: c.id,
-                  view: current.params.get("view") || "threads",
-                })}
-                className={
-                  page === "topics" && activeChannel === c.id ? "selected" : ""
-                }
-              >
-                <Hash size={15} />
-                {c.name}
-                {c.subscribed && <span className="subscribed-dot" />}
-              </a>
-            ))}
+            {overview.channels
+              .filter(
+                (c) =>
+                  !c.archived ||
+                  showArchivedChannels ||
+                  (page === "topics" && activeChannel === c.id),
+              )
+              .map((c) => (
+                <a
+                  key={c.id}
+                  href={href("topics", {
+                    channel: c.id,
+                    view: current.params.get("view") || "threads",
+                  })}
+                  className={
+                    page === "topics" && activeChannel === c.id
+                      ? "selected"
+                      : ""
+                  }
+                >
+                  <Hash size={15} />
+                  {c.name}
+                  {c.archived && " (archived)"}
+                  {c.subscribed && <span className="subscribed-dot" />}
+                </a>
+              ))}
+            {overview.channels.some((c) => c.archived) && (
+              <button onClick={() => setShowArchivedChannels((v) => !v)}>
+                {showArchivedChannels
+                  ? "Hide archived channels"
+                  : "Show archived channels"}
+              </button>
+            )}
           </div>
           <div className="shell-user">
             <div>

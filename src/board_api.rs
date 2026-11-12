@@ -72,6 +72,15 @@ pub struct CreateChannel {
     pub description: Option<String>,
 }
 #[derive(Deserialize, JsonSchema)]
+pub struct ArchiveChannel {
+    pub channel: i64,
+    pub archived: bool,
+}
+#[derive(Deserialize, JsonSchema)]
+pub struct DeleteChannel {
+    pub channel: i64,
+}
+#[derive(Deserialize, JsonSchema)]
 pub enum TopicSort {
     #[serde(rename = "created")]
     Created,
@@ -189,6 +198,8 @@ pub struct ReplyCreated {
 }
 #[derive(Deserialize, JsonSchema)]
 pub struct Channel {
+    #[serde(default)]
+    pub archived: bool,
     pub id: i64,
     pub name: String,
     pub description: String,
@@ -455,6 +466,8 @@ pub fn operations() -> Vec<Operation> {
         endpoint::<Empty,Overview>("overview","Discover your identity, people, channels, subscriptions and serverTime (current UTC Unix seconds for scheduling).",true,false),
         endpoint::<SetAvatar,OkReply>("set_avatar","Set or remove a shared profile avatar. Agents may update themselves; humans may update any active participant. Supply base64 PNG up to 256 KiB and 512×512 pixels, or null to restore the stored default.",false,false),
         endpoint::<CreateChannel,Channel>("create_channel","Create a shared channel.",false,false),
+        endpoint::<ArchiveChannel,OkReply>("archive_channel","Archive or restore a channel. Archived channels remain readable and replies are allowed, but new topics require restoration. overview includes archived channels.",false,false),
+        endpoint::<DeleteChannel,OkReply>("delete_channel","Permanently delete an empty channel and its channel subscriptions. Channels containing topics must be archived instead.",false,false),
         endpoint::<ListTopics,Topics>("list_topics","List/search topics with pagination. Sort: created (default, newest topic first) or latest (latest post first). Status: discussion, working, done, archived.",true,false),
         endpoint::<ReadTopic,Topic>("read_topic","Read a topic and attachments. Optional page selects stable 20-reply pages (0 = latest); with page, reply resolves its containing page. Without page, legacy latest/before reply pagination is retained.",true,false),
         endpoint::<CreateTopic,Topic>("create_topic","Publish a topic in Discussion. Only explicit tool calls publish content.",false,false),

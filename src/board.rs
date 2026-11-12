@@ -29,6 +29,11 @@ pub struct Agent {
     pub error: Option<String>,
 }
 pub fn migrate(db: &Connection) -> Result<()> {
+    let existing: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='board_channels')",
+        [],
+        |r| r.get(0),
+    )?;
     db.execute_batch("BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS board_actors(id TEXT PRIMARY KEY,handle TEXT NOT NULL UNIQUE,name TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('human','agent')));
 CREATE TABLE IF NOT EXISTS board_default_avatars(actor TEXT PRIMARY KEY REFERENCES board_actors(id) ON DELETE CASCADE,data BLOB NOT NULL,revision TEXT NOT NULL);
@@ -46,8 +51,23 @@ CREATE INDEX IF NOT EXISTS board_topic_channel ON board_topics(channel,id);
 CREATE INDEX IF NOT EXISTS board_reply_topic ON board_replies(topic,id);
 CREATE TABLE IF NOT EXISTS board_attachments(id TEXT PRIMARY KEY,owner TEXT NOT NULL REFERENCES board_actors(id),name TEXT NOT NULL,mime TEXT NOT NULL,size INTEGER NOT NULL,topic INTEGER REFERENCES board_topics(id),reply INTEGER REFERENCES board_replies(id));
 CREATE TABLE IF NOT EXISTS board_requests(actor TEXT NOT NULL,request TEXT NOT NULL,operation TEXT NOT NULL,input TEXT NOT NULL,result TEXT NOT NULL,PRIMARY KEY(actor,request));
-INSERT OR IGNORE INTO board_channels(name,description) VALUES('general','Shared conversations and work');
-COMMIT;")?;
+")?;
+    let has_archived = db
+        .prepare("PRAGMA table_info(board_channels)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|c| c == "archived");
+    if !has_archived {
+        db.execute(
+            "ALTER TABLE board_channels ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !existing {
+        db.execute("INSERT INTO board_channels(name,description) VALUES('general','Shared conversations and work')", [])?;
+    }
+    db.execute_batch("COMMIT;")?;
     crate::avatars::ensure_defaults(db)?;
     Ok(())
 }
@@ -474,7 +494,7 @@ impl Store {
                         Ok(value)
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                let channels=tx.prepare("SELECT c.id,c.name,c.description,COALESCE(s.subscribed,0) FROM board_channels c LEFT JOIN board_subscriptions s ON s.kind='channel' AND s.target=c.id AND s.actor=?1 ORDER BY c.name")?.query_map([&actor.id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"name":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,"subscribed":r.get::<_,bool>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                let channels=tx.prepare("SELECT c.id,c.name,c.description,COALESCE(s.subscribed,0),c.archived FROM board_channels c LEFT JOIN board_subscriptions s ON s.kind='channel' AND s.target=c.id AND s.actor=?1 ORDER BY c.name")?.query_map([&actor.id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"name":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,"subscribed":r.get::<_,bool>(3)?,"archived":r.get::<_,bool>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 json!({"me":actor,"people":people,"channels":channels,"statuses":STATUSES,"serverTime":now()})
             }
             "create_channel" => {
@@ -485,7 +505,39 @@ impl Store {
                     "INSERT INTO board_channels(name,description) VALUES(?1,?2)",
                     params![name, description],
                 )?;
-                json!({"id":tx.last_insert_rowid(),"name":name,"description":description})
+                json!({"id":tx.last_insert_rowid(),"name":name,"description":description,"archived":false})
+            }
+            "archive_channel" => {
+                let id = number(p, "channel")?;
+                let archived = p["archived"].as_bool().context("archived is required")?;
+                ensure!(
+                    tx.execute(
+                        "UPDATE board_channels SET archived=?2 WHERE id=?1",
+                        params![id, archived]
+                    )? == 1,
+                    "Channel not found"
+                );
+                json!({"ok":true})
+            }
+            "delete_channel" => {
+                let id = number(p, "channel")?;
+                ensure!(
+                    !tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM board_topics WHERE channel=?1)",
+                        [id],
+                        |r| r.get::<_, bool>(0)
+                    )?,
+                    "Only empty channels can be deleted; archive this channel to preserve its topics"
+                );
+                ensure!(
+                    tx.execute("DELETE FROM board_channels WHERE id=?1", [id])? == 1,
+                    "Channel not found"
+                );
+                tx.execute(
+                    "DELETE FROM board_subscriptions WHERE kind='channel' AND target=?1",
+                    [id],
+                )?;
+                json!({"ok":true})
             }
             "list_topics" => {
                 let channel = p["channel"].as_i64();
@@ -502,7 +554,7 @@ impl Store {
                         (SELECT created_at FROM board_replies r WHERE r.topic=t.id ORDER BY id DESC LIMIT 1),
                         t.created_at) ELSE t.id END AS sort_key FROM board_topics t
                     )
-                    SELECT id FROM ranked WHERE (?1 IS NULL OR channel=?1)
+                    SELECT id FROM ranked WHERE (?1 IS NULL OR channel=?1) AND (?1 IS NOT NULL OR channel IN (SELECT id FROM board_channels WHERE archived=0))
                     AND (sort_key,id)<(COALESCE((SELECT sort_key FROM ranked WHERE id=?2),9223372036854775807),?2)
                     AND (?3 IS NULL OR status=?3)
                     AND (?4='' OR instr(lower(title||' '||body),lower(?4))>0 OR EXISTS(SELECT 1 FROM board_replies r WHERE r.topic=ranked.id AND instr(lower(r.body),lower(?4))>0))
@@ -580,6 +632,18 @@ impl Store {
             }
             "create_topic" => {
                 let channel = number(p, "channel")?;
+                let archived: bool = tx
+                    .query_row(
+                        "SELECT archived FROM board_channels WHERE id=?1",
+                        [channel],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .context("Channel not found")?;
+                ensure!(
+                    !archived,
+                    "Restore this archived channel before creating topics"
+                );
                 let body = string(p, "body", 200000)?;
                 ensure!(
                     !body.trim().is_empty()
@@ -764,6 +828,126 @@ mod tests {
         (dir, store, alice, bob)
     }
     #[test]
+    fn channel_archive_restore_delete_and_reopen() {
+        let (dir, s, a, b) = setup();
+        // An existing v0.6.14 database gains the archived column without losing data.
+        {
+            let db = s.0.lock().unwrap();
+            db.execute("ALTER TABLE board_channels DROP COLUMN archived", [])
+                .unwrap();
+            migrate(&db).unwrap();
+        }
+        let c = s
+            .board(&a, "create_channel", &json!({"name":"retired"}))
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        s.board(
+            &b,
+            "set_subscription",
+            &json!({"kind":"channel","target":c,"subscribed":true}),
+        )
+        .unwrap();
+        let topic = s
+            .board(&a, "create_topic", &json!({"channel":c,"body":"Preserved"}))
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        assert!(
+            s.board(&a, "delete_channel", &json!({"channel":c}))
+                .is_err()
+        );
+        s.board(&a, "archive_channel", &json!({"channel":c,"archived":true}))
+            .unwrap();
+        let overview = s.board(&a, "overview", &json!({})).unwrap();
+        assert_eq!(
+            overview["channels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == c)
+                .unwrap()["archived"],
+            true
+        );
+        assert!(
+            s.board(&a, "create_topic", &json!({"channel":c,"body":"Blocked"}))
+                .is_err()
+        );
+        assert!(
+            s.board(&a, "list_topics", &json!({})).unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            s.board(&a, "list_topics", &json!({"channel":c})).unwrap()["data"][0]["id"],
+            topic
+        );
+        assert_eq!(
+            s.board(&a, "read_topic", &json!({"topic":topic})).unwrap()["body"],
+            "Preserved"
+        );
+        s.board(
+            &b,
+            "post_reply",
+            &json!({"topic":topic,"body":"Still accessible"}),
+        )
+        .unwrap();
+        s.board(
+            &a,
+            "archive_channel",
+            &json!({"channel":c,"archived":false}),
+        )
+        .unwrap();
+        s.board(&a, "create_topic", &json!({"channel":c,"body":"Restored"}))
+            .unwrap();
+        // Empty channels may be deleted, including general, and are not re-seeded at restart.
+        s.board(&a, "delete_channel", &json!({"channel":1}))
+            .unwrap();
+        let empty = s
+            .board(&a, "create_channel", &json!({"name":"empty"}))
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        s.board(
+            &b,
+            "set_subscription",
+            &json!({"kind":"channel","target":empty,"subscribed":true}),
+        )
+        .unwrap();
+        let request = json!({"channel":empty,"requestId":"delete-empty"});
+        s.board(&a, "delete_channel", &request).unwrap();
+        assert!(s.board(&a, "delete_channel", &request).is_ok());
+        assert!(
+            s.board(
+                &a,
+                "archive_channel",
+                &json!({"channel":empty,"archived":false})
+            )
+            .is_err()
+        );
+        {
+            let db = s.0.lock().unwrap();
+            assert_eq!(
+                db.query_row(
+                    "SELECT COUNT(*) FROM board_subscriptions WHERE kind='channel' AND target=?1",
+                    [empty],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+        drop(s);
+        let s = Store::open(dir.path()).unwrap();
+        let channels = s.board(&a, "overview", &json!({})).unwrap()["channels"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0]["id"], c);
+    }
+    #[test]
     fn subscriptions_mentions_assignments_and_read_state_are_independent() {
         let (_dir, s, a, b) = setup();
         s.board(
@@ -902,6 +1086,25 @@ mod tests {
         .unwrap();
         let agent = s.board_agent_auth(&token).unwrap().unwrap();
         assert_eq!(agent.kind, "agent");
+        let channel = s
+            .board(&agent, "create_channel", &json!({"name":"agent-managed"}))
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        s.board(
+            &agent,
+            "archive_channel",
+            &json!({"channel":channel,"archived":true}),
+        )
+        .unwrap();
+        s.board(
+            &agent,
+            "archive_channel",
+            &json!({"channel":channel,"archived":false}),
+        )
+        .unwrap();
+        s.board(&agent, "delete_channel", &json!({"channel":channel}))
+            .unwrap();
         assert!(s.board_agent_auth("wrong").unwrap().is_none());
         let t = s
             .board(
