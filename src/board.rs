@@ -589,14 +589,14 @@ impl Store {
                         [id],
                         |r| r.get(0),
                     )?;
-                    let pages = ((count + 19) / 20).max(1);
+                    let pages = (count + 1 + 19) / 20;
                     let selected = if let Some(reply) = p["reply"].as_i64() {
                         let prior: i64 = tx.query_row(
                             "SELECT COUNT(*) FROM board_replies WHERE topic=?1 AND id<?2",
                             params![id, reply],
                             |r| r.get(0),
                         )?;
-                        prior / 20 + 1
+                        (prior + 1) / 20 + 1
                     } else if requested == 0 {
                         pages
                     } else {
@@ -605,10 +605,11 @@ impl Store {
                     t["page"] = json!(selected);
                     t["pageCount"] = json!(pages);
                     t["replyCount"] = json!(count);
+                    t["postCount"] = json!(count + 1);
                     t["pageSize"] = json!(20);
                     t["nextCursor"] = Value::Null;
-                    tx.prepare("SELECT id,author,body,created_at FROM board_replies WHERE topic=?1 ORDER BY id ASC LIMIT 20 OFFSET ?2")?
-                        .query_map(params![id,(selected-1)*20],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"author":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?,"createdAt":r.get::<_,i64>(3)?})))?
+                    tx.prepare("SELECT id,author,body,created_at FROM board_replies WHERE topic=?1 ORDER BY id ASC LIMIT ?2 OFFSET ?3")?
+                        .query_map(params![id,if selected==1 {19}else{20},((selected-1)*20-1).max(0)],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"author":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?,"createdAt":r.get::<_,i64>(3)?})))?
                         .collect::<rusqlite::Result<Vec<_>>>()?
                 } else {
                     let rows=tx.prepare("SELECT id,author,body,created_at FROM board_replies WHERE topic=?1 AND id<?2 ORDER BY id DESC LIMIT 101")?.query_map(params![id,before],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"author":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?,"createdAt":r.get::<_,i64>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1379,6 +1380,7 @@ mod tests {
         assert_eq!(empty["page"], 1);
         assert_eq!(empty["pageCount"], 1);
         assert_eq!(empty["replyCount"], 0);
+        assert_eq!(empty["postCount"], 1);
         let mut replies = Vec::new();
         for n in 0..41 {
             replies.push(
@@ -1395,20 +1397,20 @@ mod tests {
         let first = s
             .board(&a, "read_topic", &json!({"topic":id,"page":1}))
             .unwrap();
-        assert_eq!(first["replies"].as_array().unwrap().len(), 20);
+        assert_eq!(first["replies"].as_array().unwrap().len(), 19);
         assert_eq!(first["replies"][0]["id"], replies[0]);
-        assert_eq!(first["replies"][19]["id"], replies[19]);
+        assert_eq!(first["replies"][18]["id"], replies[18]);
         let second = s
             .board(&a, "read_topic", &json!({"topic":id,"page":2}))
             .unwrap();
         assert_eq!(second["replies"].as_array().unwrap().len(), 20);
-        assert_eq!(second["replies"][0]["id"], replies[20]);
+        assert_eq!(second["replies"][0]["id"], replies[19]);
         let latest = s
             .board(&a, "read_topic", &json!({"topic":id,"page":0}))
             .unwrap();
         assert_eq!(latest["page"], 3);
         assert_eq!(latest["pageCount"], 3);
-        assert_eq!(latest["replies"].as_array().unwrap().len(), 1);
+        assert_eq!(latest["replies"].as_array().unwrap().len(), 2);
         let linked = s
             .board(
                 &a,
@@ -1417,7 +1419,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(linked["page"], 2);
-        assert_eq!(linked["replies"][19]["id"], replies[39]);
+        assert_eq!(
+            s.board(
+                &a,
+                "read_topic",
+                &json!({"topic":id,"page":0,"reply":replies[18]})
+            )
+            .unwrap()["page"],
+            1
+        );
+        assert_eq!(
+            s.board(
+                &a,
+                "read_topic",
+                &json!({"topic":id,"page":0,"reply":replies[19]})
+            )
+            .unwrap()["page"],
+            2
+        );
+        assert_eq!(
+            s.board(
+                &a,
+                "read_topic",
+                &json!({"topic":id,"page":0,"reply":replies[39]})
+            )
+            .unwrap()["page"],
+            3
+        );
+        assert_eq!(linked["replies"][19]["id"], replies[38]);
         s.board(&a, "post_reply", &json!({"topic":id,"body":"New reply"}))
             .unwrap();
         assert_eq!(

@@ -583,7 +583,7 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
         aria-label={"Reply pages (" + position + ")"}
       >
         <p>
-          Page {topic.page} of {topic.pageCount} · {topic.replyCount} replies
+          Page {topic.page} of {topic.pageCount} · {topic.postCount} posts
         </p>
         <div>
           {topic.page > 1 ? (
@@ -710,16 +710,6 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
               {topic.subscribed ? "Unsubscribe" : "Subscribe"}
             </button>
           </div>
-          {topic.page === 1 && (
-            <article className="post opening">
-              <div className="post-by">
-                <Person id={topic.author} />
-                <time>{new Date(topic.createdAt * 1000).toLocaleString()}</time>
-              </div>
-              <RichText text={topic.body} />
-              <Attachments files={topic.attachments} />
-            </article>
-          )}
           {reply && (
             <p className="notice">
               Linked reply highlighted on this page.{" "}
@@ -742,15 +732,28 @@ function TopicDetail({ id, onClose, view, onViewChange }) {
             />
           )}
           <div className="replies-heading">
-            <h3>Replies</h3>
+            <h3>Posts</h3>
           </div>
           {pagination("top")}
-          {topic.replies.map((r) => (
+          {[
+            ...(topic.page === 1
+              ? [
+                  {
+                    id: "opening",
+                    author: topic.author,
+                    createdAt: topic.createdAt,
+                    body: topic.body,
+                    attachments: topic.attachments,
+                  },
+                ]
+              : []),
+            ...topic.replies,
+          ].map((r) => (
             <article
               className={
                 "post" + (String(r.id) === reply ? " search-focus" : "")
               }
-              id={"reply-" + r.id}
+              id={r.id === "opening" ? "topic-post-" + id : "reply-" + r.id}
               key={r.id}
             >
               <div className="post-by">

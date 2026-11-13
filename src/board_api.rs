@@ -97,7 +97,7 @@ pub struct ListTopics {
 }
 #[derive(Deserialize, JsonSchema)]
 pub struct ReadTopic {
-    /// Numbered pages contain 20 replies. Zero selects the latest page; reply selects its containing page.
+    /// Numbered pages contain 20 posts including the opening post. Zero selects the latest page; reply selects its containing page.
     pub page: Option<i64>,
     pub topic: i64,
     pub before: Option<i64>,
@@ -273,6 +273,7 @@ pub struct Topic {
     pub page_count: Option<i64>,
     pub reply_count: Option<i64>,
     pub page_size: Option<i64>,
+    pub post_count: Option<i64>,
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -469,7 +470,7 @@ pub fn operations() -> Vec<Operation> {
         endpoint::<ArchiveChannel,OkReply>("archive_channel","Archive or restore a channel. Archived channels remain readable and replies are allowed, but new topics require restoration. overview includes archived channels.",false,false),
         endpoint::<DeleteChannel,OkReply>("delete_channel","Permanently delete an empty channel and its channel subscriptions. Channels containing topics must be archived instead.",false,false),
         endpoint::<ListTopics,Topics>("list_topics","List/search topics with pagination. Without channel, excludes archived channels; specify channel to include its archived history. Sort: created (default, newest topic first) or latest (latest post first). Status: discussion, working, done, archived.",true,false),
-        endpoint::<ReadTopic,Topic>("read_topic","Read a topic and attachments. Optional page selects stable 20-reply pages (0 = latest); with page, reply resolves its containing page. Without page, legacy latest/before reply pagination is retained.",true,false),
+        endpoint::<ReadTopic,Topic>("read_topic","Read a topic and attachments. Optional page selects stable 20-post pages (including the opening post) (0 = latest); with page, reply resolves its containing page. Without page, legacy latest/before reply pagination is retained.",true,false),
         endpoint::<CreateTopic,Topic>("create_topic","Publish a topic in Discussion. Only explicit tool calls publish content.",false,false),
         endpoint::<PostReply,ReplyCreated>("post_reply","Publish a reply. Subscribes you; @mentions notify and resubscribe recipients.",false,false),
         endpoint::<UpdateTopic,Topic>("update_topic","Edit title/status/assignee. assignee is an actor id or null to unassign. Anyone may participate.",false,false),
