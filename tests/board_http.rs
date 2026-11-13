@@ -896,3 +896,118 @@ async fn avatars_are_shared_authenticated_persistent_and_permission_scoped() {
     assert_eq!(person["customAvatar"], false);
     assert!(person["avatarUrl"].as_str().is_some());
 }
+
+#[tokio::test]
+async fn attachment_api_and_mcp_return_metadata_image_text_and_private_downloads() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use std::io::{BufRead, Write};
+    let f = Fixture::new().await;
+    let token = security::token();
+    let id = uuid::Uuid::new_v4().to_string();
+    let key = f.app.store.enrollment().unwrap();
+    let (worker, _) = f.app.store.enroll(&key, "attachment fixture").unwrap();
+    f.app
+        .store
+        .board_add_agent(
+            &Agent {
+                id: id.clone(),
+                handle: "image-reader".into(),
+                name: "Image reader".into(),
+                worker,
+                thread: "attachment-thread".into(),
+                persona: String::new(),
+                settings: json!({}),
+                paused: true,
+                error: None,
+            },
+            &token,
+        )
+        .unwrap();
+    let image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=";
+    let bytes = STANDARD.decode(image).unwrap();
+    let file = f
+        .op(
+            "upload_attachment",
+            json!({"name":"pixel.png","mime":"image/png","data":image}),
+        )
+        .await;
+    // The owner may read its draft through the typed API, but another actor cannot.
+    let read = f.op("read_attachment", json!({"id":file["id"]})).await;
+    assert_eq!(read["size"], bytes.len());
+    assert_eq!(read["data"], image);
+    let private = f
+        .client
+        .post(format!("{}/api/board/read_attachment", f.url))
+        .bearer_auth(&token)
+        .json(&json!({"id":file["id"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(private.status(), StatusCode::BAD_REQUEST);
+    let text = f
+        .op(
+            "upload_attachment",
+            json!({"name":"notes.txt","mime":"text/plain","data":STANDARD.encode("Useful notes")}),
+        )
+        .await;
+    let topic = f
+        .op(
+            "create_topic",
+            json!({"channel":1,"body":"Published evidence","attachments":[file["id"],text["id"]]}),
+        )
+        .await;
+    assert!(topic["id"].is_number());
+    let credential = f.dir.path().join("attachment-mcp.json");
+    security::private_write(
+        &credential,
+        &serde_json::to_vec(&json!({"host":f.url,"token":token,"cwd":f.dir.path()})).unwrap(),
+    )
+    .unwrap();
+    let mut mcp = std::process::Command::new(env!("CARGO_BIN_EXE_worker"))
+        .args(["mcp", "--credential-file", credential.to_str().unwrap()])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = mcp.stdin.take().unwrap();
+    let output = mcp.stdout.take().unwrap();
+    let file_id = file["id"].clone();
+    let text_id = text["id"].clone();
+    let replies=tokio::task::spawn_blocking(move || {
+        let mut lines=std::io::BufReader::new(output);let mut replies=Vec::new();
+        for (i,args) in [json!({"id":file_id,"path":"saved.png"}),json!({"id":file_id,"path":"saved.png"}),json!({"id":text_id}),json!({"id":file_id,"path":"../escape.png"})].into_iter().enumerate() {
+            writeln!(input,"{}",json!({"jsonrpc":"2.0","id":i,"method":"tools/call","params":{"name":"read_attachment","arguments":args}})).unwrap();input.flush().unwrap();
+            let mut line=String::new();lines.read_line(&mut line).unwrap();replies.push(serde_json::from_str::<Value>(&line).unwrap());
+        }
+        replies
+    }).await.unwrap();
+    mcp.kill().unwrap();
+    mcp.wait().unwrap();
+    let result = &replies[0]["result"];
+    assert_eq!(result["isError"], false, "{result}");
+    let metadata: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(metadata["size"], bytes.len());
+    assert_eq!(metadata["name"], "pixel.png");
+    assert!(metadata.get("data").is_none());
+    assert!(metadata["savedPath"].is_string());
+    assert_eq!(
+        result["content"][1],
+        json!({"type":"image","mimeType":"image/png","data":image})
+    );
+    assert_eq!(
+        std::fs::read(f.dir.path().join("saved.png")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        replies[1]["result"]["isError"], true,
+        "Never overwrite an existing file"
+    );
+    let text_metadata: Value =
+        serde_json::from_str(replies[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text_metadata["text"], "Useful notes");
+    assert_eq!(
+        replies[3]["result"]["isError"], true,
+        "Never save outside workspace"
+    );
+}
