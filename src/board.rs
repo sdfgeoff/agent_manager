@@ -428,7 +428,9 @@ impl Store {
         if op == "read_attachment" {
             let id = string(p, "id", 100)?;
             let (name, mime, bytes) = self.board_attachment(actor, id)?;
-            return Ok(json!({"id":id,"name":name,"mime":mime,"data":STANDARD.encode(bytes)}));
+            return Ok(
+                json!({"id":id,"name":name,"mime":mime,"size":bytes.len(),"data":STANDARD.encode(bytes)}),
+            );
         }
         let mut db = self.0.lock().unwrap();
         let tx = db.transaction()?;
