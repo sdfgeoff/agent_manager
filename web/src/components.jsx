@@ -297,7 +297,6 @@ export function Attachments({ files = [] }) {
 export function MentionInput({
   value,
   onChange,
-  onSubmit,
   disabled,
   label = "Message",
   placeholder,
@@ -358,7 +357,7 @@ export function MentionInput({
         );
         return;
       }
-      if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+      if (e.key === "Tab") {
         e.preventDefault();
         insert(matches[Math.min(index, matches.length - 1)]);
         return;
@@ -369,10 +368,6 @@ export function MentionInput({
         setQuery(null);
         return;
       }
-    }
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      if (!disabled) onSubmit?.();
     }
   }
   return (
@@ -543,6 +538,14 @@ export function Composer({
     >
       {title && (
         <input
+          onKeyDown={(e) => {
+            if (
+              e.key === "Enter" &&
+              !e.nativeEvent.isComposing &&
+              e.keyCode !== 229
+            )
+              e.preventDefault();
+          }}
           aria-label="Topic title"
           placeholder="Topic title (optional)"
           maxLength={500}
@@ -559,7 +562,6 @@ export function Composer({
           setText(v);
           request.current = null;
         }}
-        onSubmit={send}
         disabled={busy}
         label={label}
         placeholder={placeholder}
@@ -603,9 +605,7 @@ export function Composer({
             <Paperclip size={18} />
           </button>
           <span className="muted">
-            {uploading
-              ? "Uploading…"
-              : "Enter to send · Shift+Enter for a new line"}
+            {uploading ? "Uploading…" : "Enter for a new line"}
           </span>
         </div>
         <BusyButton

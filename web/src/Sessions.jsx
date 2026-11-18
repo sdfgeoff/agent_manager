@@ -745,22 +745,9 @@ export default function Sessions({ params }) {
                 rows={3}
                 maxLength={200000}
                 onChange={(e) => setText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (
-                    e.key === "Enter" &&
-                    !e.shiftKey &&
-                    !e.nativeEvent.isComposing &&
-                    e.keyCode !== 229
-                  ) {
-                    e.preventDefault();
-                    send();
-                  }
-                }}
               />
               <div className="composer-toolbar">
-                <span className="muted">
-                  Enter to send · Shift+Enter for a new line
-                </span>
+                <span className="muted">Enter for a new line</span>
                 <div>
                   {active && (
                     <button type="button" className="danger" onClick={stop}>
