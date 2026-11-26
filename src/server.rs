@@ -1,5 +1,6 @@
 mod accounts;
 mod board_http;
+mod login_throttle;
 mod presence;
 mod push_http;
 mod frontend {
@@ -8,10 +9,10 @@ mod frontend {
 use crate::{Wire, now, security, store::Store};
 use anyhow::Result;
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Bytes,
     extract::{
-        DefaultBodyLimit, Path, Request, State, WebSocketUpgrade,
+        ConnectInfo, DefaultBodyLimit, Path, Request, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -28,6 +29,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
     convert::Infallible,
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -83,7 +85,9 @@ pub struct App {
     pending: Mutex<HashMap<String, Pending>>,
     events: broadcast::Sender<Value>,
     attempts: Mutex<VecDeque<Instant>>,
-    login_lock: tokio::sync::Semaphore,
+    enrollment_attempts: Mutex<VecDeque<Instant>>,
+    login_lock: Arc<tokio::sync::Semaphore>,
+    login_throttle: Arc<login_throttle::LoginThrottle>,
     deployment: Option<crate::webhook::Deployment>,
     agent_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     board_wake: tokio::sync::Notify,
@@ -125,7 +129,9 @@ impl App {
             pending: Mutex::new(HashMap::new()),
             events: broadcast::channel(2048).0,
             attempts: Mutex::new(VecDeque::new()),
-            login_lock: tokio::sync::Semaphore::new(2),
+            enrollment_attempts: Mutex::new(VecDeque::new()),
+            login_lock: Arc::new(tokio::sync::Semaphore::new(2)),
+            login_throttle: Arc::new(login_throttle::LoginThrottle::default()),
             deployment,
             agent_locks: Mutex::new(HashMap::new()),
             board_wake: tokio::sync::Notify::new(),
@@ -180,8 +186,14 @@ impl App {
             if self.secure { "; Secure" } else { "" }
         )
     }
-    fn limit_login(&self) -> ApiResult<()> {
-        let mut attempts = self.attempts.lock().unwrap();
+    fn limit_password_management(&self) -> ApiResult<()> {
+        Self::limit_attempts(&self.attempts)
+    }
+    fn limit_enrollment(&self) -> ApiResult<()> {
+        Self::limit_attempts(&self.enrollment_attempts)
+    }
+    fn limit_attempts(budget: &Mutex<VecDeque<Instant>>) -> ApiResult<()> {
+        let mut attempts = budget.lock().unwrap();
         attempts.retain(|t| t.elapsed() < Duration::from_secs(60));
         if attempts.len() >= 10 {
             return Err(rejected(
@@ -330,6 +342,18 @@ async fn deployment_webhook(
     }
 }
 
+fn login_retry(status: StatusCode, message: &str, seconds: u64) -> Response {
+    (
+        status,
+        [(header::RETRY_AFTER, seconds.to_string())],
+        Json(json!({
+            "error": format!("{message}; try again in {seconds} seconds"),
+            "retryAfterSeconds": seconds,
+        })),
+    )
+        .into_response()
+}
+
 #[derive(Deserialize)]
 struct Login {
     username: String,
@@ -338,14 +362,33 @@ struct Login {
 async fn login(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(body): Json<Login>,
 ) -> ApiResult<Response> {
     app.csrf(&headers)?;
-    app.limit_login()?;
-    let _permit = app
-        .login_lock
-        .try_acquire()
-        .map_err(|_| rejected(StatusCode::TOO_MANY_REQUESTS, "Sign in busy; try again"))?;
+    let ip = login_throttle::client_ip(peer.map(|p| p.0.0), &headers);
+    let attempt = match app.login_throttle.begin(ip, Instant::now()) {
+        Ok(attempt) => attempt,
+        Err(seconds) => {
+            return Ok(login_retry(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many attempts",
+                seconds,
+            ));
+        }
+    };
+    let permit = match app.login_lock.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            // A saturated verifier is not an incorrect password.
+            attempt.busy();
+            return Ok(login_retry(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Sign in busy",
+                1,
+            ));
+        }
+    };
     let user = match security::username(&body.username) {
         Ok(username) => app.store.user(&username)?,
         Err(_) => None,
@@ -354,23 +397,30 @@ async fn login(
         .as_ref()
         .map(|u| u.password_hash.clone())
         .unwrap_or_else(|| app.dummy_password.clone());
-    let valid =
-        tokio::task::spawn_blocking(move || security::verify_password(&body.password, &hash))
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-    if !valid || user.is_none() {
-        return Err(rejected(
+    let (valid, attempt) = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        (security::verify_password(&body.password, &hash), attempt)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
+    let valid = valid
+        && user.as_ref().is_some_and(|u| {
+            app.store
+                .user_version(&u.username)
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some(u.version.as_str())
+        });
+    let seconds = attempt.finish(valid, Instant::now());
+    if !valid {
+        return Ok(login_retry(
             StatusCode::UNAUTHORIZED,
             "Incorrect username or password",
+            seconds,
         ));
     }
     let user = user.unwrap();
-    if app.store.user_version(&user.username)?.as_deref() != Some(&user.version) {
-        return Err(rejected(
-            StatusCode::UNAUTHORIZED,
-            "Incorrect username or password",
-        ));
-    }
     let token = security::token();
     {
         let mut sessions = app.sessions.lock().unwrap();
@@ -438,7 +488,7 @@ async fn enroll(
     State(app): State<Arc<App>>,
     Json(body): Json<Enrollment>,
 ) -> ApiResult<Json<Value>> {
-    app.limit_login()?;
+    app.limit_enrollment()?;
     let (id, credential) = app.store.enroll(&body.key, &body.name).map_err(|_| {
         rejected(
             StatusCode::UNAUTHORIZED,

@@ -1,7 +1,8 @@
 export class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, retryAfterSeconds = 0) {
     super(message);
     this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 export const events = new EventTarget();
@@ -36,6 +37,7 @@ export async function api(path, body, method, signal) {
     throw new ApiError(
       result.error || `Request failed (${response.status})`,
       response.status,
+      Number(response.headers.get("Retry-After")) || 0,
     );
   }
   return result;

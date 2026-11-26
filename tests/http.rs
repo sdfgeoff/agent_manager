@@ -165,7 +165,12 @@ impl Server {
         let app = App::with_deployment(store, &url, deployment).unwrap();
         let routes = router(app.clone());
         let task = tokio::spawn(async move {
-            axum::serve(listener, routes).await.unwrap();
+            axum::serve(
+                listener,
+                routes.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         Self {
             url,
@@ -367,12 +372,13 @@ async fn deployment_only_accepts_signed_stable_release_events_for_this_repositor
 async fn invalid_logins_do_not_reveal_whether_a_username_exists() {
     let server = Server::new().await;
     let mut errors = Vec::new();
-    for username in ["admin", "unknown", "bad name"] {
+    for (index, username) in ["admin", "unknown", "bad name"].into_iter().enumerate() {
         let response = server
             .client
             .post(format!("{}/api/login", server.url))
             .header("Origin", &server.url)
             .header("X-Agentmanager", "1")
+            .header("X-Forwarded-For", format!("192.0.2.{}", index + 1))
             .json(&json!({"username":username,"password":"an incorrect password"}))
             .send()
             .await
@@ -424,6 +430,7 @@ async fn browser_authentication_csrf_logout_and_headers() {
         .await
         .unwrap();
     assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let cookie = server.login().await;
     let enrollment = server
         .client
@@ -712,7 +719,7 @@ async fn rpc_routes_to_worker_and_revocation_disconnects_it() {
 }
 
 #[tokio::test]
-async fn global_authentication_rate_limit_is_enforced() {
+async fn enrollment_rate_limit_is_enforced() {
     let server = Server::new().await;
     for index in 0..11 {
         let response = server
@@ -1030,5 +1037,66 @@ async fn generated_openapi_requires_auth_and_registered_types_validate_real_endp
             .await
             .is_err(),
         "Read-only operations must not publish change events"
+    );
+}
+
+#[tokio::test]
+async fn login_backoff_is_per_source_and_enrollment_cannot_exhaust_logins() {
+    let server = Server::new().await;
+    let attempt = |ip: &str, username: &str, password: &str| {
+        server
+            .client
+            .post(format!("{}/api/login", server.url))
+            .header("Origin", &server.url)
+            .header("X-Agentmanager", "1")
+            .header("X-Forwarded-For", ip)
+            .json(&json!({"username":username,"password":password}))
+            .send()
+    };
+    let first = attempt("192.0.2.1", "ADMIN", "wrong").await.unwrap();
+    assert_eq!(first.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(first.headers()["retry-after"], "1");
+    let early = attempt("198.51.100.1, 192.0.2.1", "another-name", "wrong")
+        .await
+        .unwrap();
+    assert_eq!(early.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(early.headers()["retry-after"], "1");
+    assert!(early.headers().get("set-cookie").is_none());
+    assert_eq!(
+        attempt("192.0.2.2", "admin", "test password long enough")
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let second = attempt("192.0.2.1", "unknown", "wrong").await.unwrap();
+    assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(second.headers()["retry-after"], "2");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        attempt("192.0.2.1", "admin", "test password long enough")
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let reset = attempt("192.0.2.1", "admin", "wrong").await.unwrap();
+    assert_eq!(reset.headers()["retry-after"], "1");
+    for _ in 0..11 {
+        server
+            .client
+            .post(format!("{}/api/enroll", server.url))
+            .json(&json!({"key":"invalid","name":"test"}))
+            .send()
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        attempt("192.0.2.3", "admin", "test password long enough")
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
     );
 }

@@ -111,11 +111,14 @@ async fn main() -> Result<()> {
     let app = App::with_deployment(store, &args.public_url, deployment)?;
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(listen=%args.listen,url=%args.public_url,"server started");
-    axum::serve(listener, router(app.clone()))
-        .with_graceful_shutdown(async move {
-            agentmanager::shutdown_signal().await;
-            app.shutdown();
-        })
-        .await?;
+    axum::serve(
+        listener,
+        router(app.clone()).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        agentmanager::shutdown_signal().await;
+        app.shutdown();
+    })
+    .await?;
     Ok(())
 }

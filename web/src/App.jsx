@@ -478,13 +478,24 @@ function Login({ onSubmit, outerError }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [retryUntil, setRetryUntil] = useState(0);
+  const [remaining, setRemaining] = useState(0);
+  useEffect(() => {
+    function update() {
+      setRemaining(Math.max(0, Math.ceil((retryUntil - Date.now()) / 1000)));
+    }
+    update();
+    if (!retryUntil) return;
+    const timer = setInterval(update, 250);
+    return () => clearInterval(timer);
+  }, [retryUntil]);
   return (
     <section className="login-screen">
       <form
         className="login-card"
         onSubmit={async (e) => {
           e.preventDefault();
-          if (busy) return;
+          if (busy || Date.now() < retryUntil) return;
           setBusy(true);
           setError(null);
           try {
@@ -492,6 +503,10 @@ function Login({ onSubmit, outerError }) {
             setPassword("");
           } catch (e) {
             setError(e);
+            if (e.retryAfterSeconds > 0) {
+              setRetryUntil(Date.now() + e.retryAfterSeconds * 1000);
+              setRemaining(e.retryAfterSeconds);
+            }
           } finally {
             setBusy(false);
           }
@@ -527,8 +542,16 @@ function Login({ onSubmit, outerError }) {
           />
         </label>
         <ErrorMessage error={error || outerError} />
-        <button className="primary wide" disabled={busy} type="submit">
-          {busy ? "Signing in…" : "Sign in ↗"}
+        <button
+          className="primary wide"
+          disabled={busy || remaining > 0}
+          type="submit"
+        >
+          {busy
+            ? "Signing in…"
+            : remaining > 0
+              ? `Try again in ${remaining}s`
+              : "Sign in ↗"}
         </button>
       </form>
     </section>

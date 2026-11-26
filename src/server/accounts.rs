@@ -17,17 +17,20 @@ struct NewUser {
     password: String,
 }
 async fn hash(app: &App, password: String) -> ApiResult<String> {
-    app.limit_login()?;
-    let _permit = app.login_lock.try_acquire().map_err(|_| {
+    app.limit_password_management()?;
+    let permit = app.login_lock.clone().try_acquire_owned().map_err(|_| {
         rejected(
             StatusCode::TOO_MANY_REQUESTS,
             "Password operations are busy; try again",
         )
     })?;
-    tokio::task::spawn_blocking(move || security::hash_password(&password))
-        .await
-        .map_err(|_| rejected(StatusCode::INTERNAL_SERVER_ERROR, "Password hashing failed"))?
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        security::hash_password(&password)
+    })
+    .await
+    .map_err(|_| rejected(StatusCode::INTERNAL_SERVER_ERROR, "Password hashing failed"))?
+    .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))
 }
 async fn create_user(
     State(app): State<Arc<App>>,
@@ -70,8 +73,8 @@ async fn password(
 ) -> ApiResult<Response> {
     let username = app.authorize(&headers)?;
     app.csrf(&headers)?;
-    app.limit_login()?;
-    let _permit = app.login_lock.try_acquire().map_err(|_| {
+    app.limit_password_management()?;
+    let permit = app.login_lock.clone().try_acquire_owned().map_err(|_| {
         rejected(
             StatusCode::TOO_MANY_REQUESTS,
             "Password operations are busy; try again",
@@ -83,6 +86,7 @@ async fn password(
         .ok_or_else(|| rejected(StatusCode::UNAUTHORIZED, "Sign in required"))?;
     let hash = user.password_hash;
     let new_hash = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         if !security::verify_password(&body.current_password, &hash) {
             anyhow::bail!("Current password is incorrect");
         }
